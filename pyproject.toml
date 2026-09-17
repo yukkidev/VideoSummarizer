@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "videosummarizer"
+version = "0.2.0"
+description = "Local video downloader, transcriber, summarizer, and Q&A with TUI + web GUI"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "VideoSummarizer" }]
+dependencies = []
+
+[project.optional-dependencies]
+whisper = ["faster-whisper>=1.0"]
+media = ["yt-dlp>=2025.1.1"]
+dev = ["pytest>=8", "pytest-timeout>=2", "ruff>=0.9"]
+
+[project.scripts]
+vidsum = "cli.main:main"
+vidsum-gui = "gui.server:main"
+vidsum-tui = "gui.tui:main"
+vidsum-agents = "agents.demo:main"
+
+[tool.setuptools.packages.find]
+include = ["pipeline*", "agents*", "cli*", "gui*"]
+
+[tool.setuptools.package-data]
+gui = ["static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --timeout=120"
+markers = [
+    "live: tests that touch the network, yt-dlp, or a running Ollama",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "W", "I", "UP", "BLE", "PLW"]
+

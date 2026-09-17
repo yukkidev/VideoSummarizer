@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VideoSummarizer</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">▶</span>
+    <div>
+      <h1>VideoSummarizer</h1>
+      <p class="tagline">local download · whisper · summary · ask anything</p>
+    </div>
+  </div>
+  <div class="model-bar">
+    <span id="server-dot" class="dot" title="Ollama server"></span>
+    <label for="model-select">Model</label>
+    <select id="model-select" title="Active Ollama model"></select>
+    <span id="loaded-badge" class="badge" title="Loaded in VRAM">not loaded</span>
+    <button id="refresh-models" class="icon-btn" title="Refresh model list">⟳</button>
+    <button id="pull-model" class="ghost-btn" title="Pull a new model">Pull…</button>
+  </div>
+</header>
+
+<div class="layout">
+  <aside class="sidebar">
+    <section class="panel">
+      <h2>Add a video</h2>
+      <form id="add-form">
+        <input id="url-input" type="url" placeholder="https://youtube.com/watch?v=…" required>
+        <div class="checks">
+          <label><input type="checkbox" id="opt-video" checked> video</label>
+          <label><input type="checkbox" id="opt-audio" checked> audio</label>
+          <label><input type="checkbox" id="opt-subs" checked> subtitles</label>
+          <label><input type="checkbox" id="opt-force"> redo all</label>
+        </div>
+        <div class="checks">
+          <label title="Use subtitles instead of Whisper transcription">
+            <input type="checkbox" id="opt-subtitles-only"> subtitles only (no whisper)
+          </label>
+        </div>
+        <button type="submit" id="add-btn">Download &amp; summarize</button>
+      </form>
+      <div id="job-box" class="job hidden">
+        <div class="job-head">
+          <span id="job-message">working…</span>
+          <span id="job-pct">0%</span>
+        </div>
+        <div class="progress"><div id="job-bar" class="progress-fill"></div></div>
+        <p id="job-error" class="error hidden"></p>
+      </div>
+    </section>
+
+    <section class="panel grow">
+      <h2>Library <button id="reload-videos" class="icon-btn small" title="Reload">⟳</button></h2>
+      <ul id="video-list" class="video-list"></ul>
+    </section>
+  </aside>
+
+  <main class="main">
+    <section id="empty-state" class="empty">
+      <h2>Nothing selected</h2>
+      <p>Paste a link on the left to download, transcribe, and summarize. Then ask questions
+         and click any timestamp to jump the player straight to that moment.</p>
+    </section>
+
+    <section id="detail" class="detail hidden">
+      <div class="player-wrap">
+        <video id="player" controls preload="metadata"></video>
+        <div id="no-media" class="no-media hidden">No media file downloaded for this video.</div>
+      </div>
+      <div class="video-head">
+        <div>
+          <h2 id="video-title">—</h2>
+          <p id="video-meta" class="muted"></p>
+        </div>
+        <div class="video-actions">
+          <span id="time-chip" class="time-chip">00:00</span>
+          <button id="delete-video" class="danger-btn">Delete</button>
+        </div>
+      </div>
+
+      <nav class="tabs">
+        <button class="tab active" data-tab="summary">Summary</button>
+        <button class="tab" data-tab="questions">Questions</button>
+        <button class="tab" data-tab="qa">Ask</button>
+        <button class="tab" data-tab="transcript">Transcript</button>
+      </nav>
+
+      <div id="tab-summary" class="tab-panel active">
+        <h3>Summary <span id="summary-model" class="muted"></span></h3>
+        <div id="summary-text" class="markdown"></div>
+      </div>
+
+      <div id="tab-questions" class="tab-panel">
+        <h3>Questions to explore</h3>
+        <ul id="questions-list" class="question-list"></ul>
+      </div>
+
+      <div id="tab-qa" class="tab-panel">
+        <div id="chat" class="chat"></div>
+        <form id="ask-form" class="ask-form">
+          <input id="ask-input" type="text" placeholder="Ask anything about this video…" required>
+          <button type="submit" id="ask-btn">Ask</button>
+        </form>
+      </div>
+
+      <div id="tab-transcript" class="tab-panel">
+        <h3>Timestamped transcript <span id="transcript-source" class="muted"></span></h3>
+        <div id="transcript-list" class="transcript"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
