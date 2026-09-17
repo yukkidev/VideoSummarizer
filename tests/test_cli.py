@@ -127,3 +127,73 @@ def test_main_dispatches(monkeypatch):
     monkeypatch.setattr(cli.api, "process", fake_process)
     assert cli.main(["run", "https://example.com/v", "--quiet"]) == 0
     assert called["url"] == "https://example.com/v"
+
+
+def test_parser_ask_thread_flags():
+    parser = cli.build_parser()
+    args = parser.parse_args(["ask", "v1", "--new", "--mode", "chat"])
+    assert args.new is True
+    assert args.mode == "chat"
+    assert args.ref == "v1"
+
+    args = parser.parse_args(["ask", "--global", "hello", "there"])
+    assert args.global_scope is True
+    assert args.ref == "hello"
+    assert args.question == ["there"]
+
+
+def test_cmd_ask_threaded(monkeypatch, capsys):
+    payload = {
+        "thread": {"thread_id": "t1", "title": "hello"},
+        "message": {
+            "content": "hi there",
+            "citations": [{"start": 5.0, "score": 0.5, "text": "t"}],
+        },
+    }
+    monkeypatch.setattr(
+        cli.api, "create_thread",
+        lambda *a, **k: {"thread_id": "t1", "title": "hello"},
+    )
+    monkeypatch.setattr(cli.api, "post_message", lambda *a, **k: payload)
+    args = cli.build_parser().parse_args(["ask", "v1", "hello", "--new"])
+    assert cli.cmd_ask(args) == 0
+    out = capsys.readouterr().out
+    assert "hi there" in out
+    assert "thread: t1" in out
+    assert "[00:05]" in out
+
+
+def test_cmd_ask_error_threaded(monkeypatch, capsys):
+    def boom(*a, **k):
+        raise LLMError("no conversation")
+
+    monkeypatch.setattr(
+        cli.api, "create_thread",
+        lambda *a, **k: {"thread_id": "t1", "title": "hello"},
+    )
+    monkeypatch.setattr(cli.api, "post_message", boom)
+    args = cli.build_parser().parse_args(["ask", "v1", "hello", "--new"])
+    assert cli.cmd_ask(args) == 1
+    assert "no conversation" in capsys.readouterr().err
+
+
+def test_cmd_threads(monkeypatch, capsys):
+    threads = [
+        {
+            "thread_id": "t1", "scope": "video", "video_id": "vid1",
+            "title": "T", "message_count": 4,
+        },
+    ]
+    monkeypatch.setattr(cli.api, "list_threads", lambda *a, **k: threads)
+    args = cli.build_parser().parse_args(["threads", "vid1"])
+    assert cli.cmd_threads(args) == 0
+    out = capsys.readouterr().out
+    assert "t1" in out
+    assert "4 msgs" in out
+
+
+def test_cmd_threads_json(monkeypatch, capsys):
+    monkeypatch.setattr(cli.api, "list_threads", lambda *a, **k: [{"thread_id": "t1"}])
+    args = cli.build_parser().parse_args(["threads", "--global", "--json"])
+    assert cli.cmd_threads(args) == 0
+    assert json.loads(capsys.readouterr().out)[0]["thread_id"] == "t1"

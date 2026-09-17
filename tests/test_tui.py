@@ -109,12 +109,22 @@ def test_content_lines_empty_placeholders():
 
 def test_qa_lines_with_citations():
     state = TuiState()
-    state.answers = [{"question": "q", "answer": "a", "citations": [{"start": 5, "score": 0.5, "text": "t"}]}]
+    state.thread = {
+        "title": "t",
+        "messages": [
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "content": "a",
+                "citations": [{"start": 5, "score": 0.5, "text": "t"}],
+            },
+        ],
+    }
     lines = state.qa_lines(50)
     assert any(line.startswith("you>") for line in lines)
     assert any(line.startswith("bot>") for line in lines)
     assert any("[00:05]" in line for line in lines)
-    assert TuiState().qa_lines(50) == ["(no questions asked yet)"]
+    assert TuiState().qa_lines(50) == ["(no messages in this conversation)"]
 
 
 def test_selected_timestamp():

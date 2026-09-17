@@ -153,6 +153,8 @@ class Citation:
     end: float
     text: str
     score: float = 0.0
+    video_id: str = ""
+    video_title: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -165,6 +167,8 @@ class Citation:
             end=_f(d.get("end")),
             text=d.get("text", ""),
             score=_f(d.get("score")),
+            video_id=d.get("video_id", "") or "",
+            video_title=d.get("video_title", "") or "",
         )
 
 
@@ -184,6 +188,119 @@ class Answer:
             "model": self.model,
             "citations": [c.to_dict() for c in self.citations],
         }
+
+
+@dataclass
+class ChatMessage:
+    role: str = "user"
+    content: str = ""
+    mode: str = "ask"
+    citations: list[Citation] = field(default_factory=list)
+    model: str = ""
+    created: str = ""
+    prompt_tokens: int = 0
+    eval_tokens: int = 0
+    context_limit: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "role": self.role,
+            "content": self.content,
+            "mode": self.mode,
+            "citations": [c.to_dict() for c in self.citations],
+            "model": self.model,
+            "created": self.created,
+            "prompt_tokens": self.prompt_tokens,
+            "eval_tokens": self.eval_tokens,
+            "context_limit": self.context_limit,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> ChatMessage:
+        return cls(
+            role=d.get("role", "user"),
+            content=d.get("content", ""),
+            mode=d.get("mode", "ask"),
+            citations=[Citation.from_dict(c) for c in d.get("citations", [])],
+            model=d.get("model", ""),
+            created=d.get("created", ""),
+            prompt_tokens=int(d.get("prompt_tokens") or 0),
+            eval_tokens=int(d.get("eval_tokens") or 0),
+            context_limit=int(d.get("context_limit") or 0),
+        )
+
+
+@dataclass
+class ChatThread:
+    thread_id: str = ""
+    scope: str = "video"
+    video_id: str = ""
+    title: str = ""
+    mode: str = "ask"
+    playlist_ids: list[str] = field(default_factory=list)
+    created: str = ""
+    updated: str = ""
+    messages: list[ChatMessage] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "thread_id": self.thread_id,
+            "scope": self.scope,
+            "video_id": self.video_id,
+            "title": self.title,
+            "mode": self.mode,
+            "playlist_ids": list(self.playlist_ids),
+            "created": self.created,
+            "updated": self.updated,
+            "messages": [m.to_dict() for m in self.messages],
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> ChatThread:
+        return cls(
+            thread_id=d.get("thread_id", ""),
+            scope=d.get("scope", "video"),
+            video_id=d.get("video_id", "") or "",
+            title=d.get("title", ""),
+            mode=d.get("mode", "ask"),
+            playlist_ids=list(d.get("playlist_ids") or []),
+            created=d.get("created", ""),
+            updated=d.get("updated", ""),
+            messages=[ChatMessage.from_dict(m) for m in d.get("messages", [])],
+        )
+
+
+@dataclass
+class Playlist:
+    playlist_id: str = ""
+    name: str = ""
+    video_ids: list[str] = field(default_factory=list)
+    created: str = ""
+    updated: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "playlist_id": self.playlist_id,
+            "name": self.name,
+            "video_ids": list(self.video_ids),
+            "created": self.created,
+            "updated": self.updated,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> Playlist:
+        return cls(
+            playlist_id=d.get("playlist_id", ""),
+            name=d.get("name", ""),
+            video_ids=list(d.get("video_ids") or []),
+            created=d.get("created", ""),
+            updated=d.get("updated", ""),
+        )
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough token estimate (~4 characters per token) for progress displays."""
+    return max(1, len(text or "") // 4)
 
 
 def format_timestamp(seconds: float) -> str:

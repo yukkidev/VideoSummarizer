@@ -48,14 +48,29 @@ def http(monkeypatch):
         if req.full_url.endswith("/api/ps"):
             return FakeResponse({
                 "models": [{"name": "ornith-1.5:9b", "size_vram": 7_100_000_000,
-                            "expires_at": "2026-01-01T00:05:00Z"}]
+                            "expires_at": "2026-01-01T00:05:00Z",
+                            "context_length": 100000}]
             })
         if req.full_url.endswith("/api/version"):
             return FakeResponse({"version": "0.33.3"})
+        if req.full_url.endswith("/api/show"):
+            return FakeResponse({
+                "model_info": {
+                    "general.architecture": "llama",
+                    "llama.context_length": 262144,
+                },
+                "parameters": "temperature 1",
+            })
         if req.full_url.endswith("/api/generate"):
             return FakeResponse({"response": "hello there"})
         if req.full_url.endswith("/api/chat"):
-            return FakeResponse({"message": {"content": "chat reply"}})
+            return FakeResponse({
+                "model": "ornith-1.5:9b",
+                "message": {"content": "chat reply"},
+                "prompt_eval_count": 17,
+                "eval_count": 5,
+                "done_reason": "stop",
+            })
         if req.full_url.endswith("/api/embed"):
             inputs = body.get("input", [])
             return FakeResponse({"embeddings": [[0.1, 0.2] for _ in inputs]})
@@ -101,6 +116,22 @@ def test_loaded_models(http):
     loaded = OllamaClient().loaded_models()
     assert loaded[0].name == "ornith-1.5:9b"
     assert loaded[0].size_vram == 7_100_000_000
+    assert loaded[0].context_length == 100000
+
+
+def test_context_length_discovery(http):
+    client = OllamaClient(model="ornith-1.5:9b")
+    assert client.loaded_context_length() == 100000
+    assert client.model_context_length() == 262144
+
+
+def test_chat_detailed_reports_usage(http):
+    result = OllamaClient().chat_detailed([{"role": "user", "content": "hi"}])
+    assert result["content"] == "chat reply"
+    assert result["model"] == "ornith-1.5:9b"
+    assert result["prompt_tokens"] == 17
+    assert result["eval_tokens"] == 5
+    assert result["done_reason"] == "stop"
 
 
 def test_refresh_ok(http):

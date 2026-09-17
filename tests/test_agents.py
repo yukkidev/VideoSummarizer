@@ -324,7 +324,8 @@ def test_agent_run_without_llm(tmp_path):
 
 def test_build_tools_names():
     tools = build_tools(out_dir="data")
-    for name in ("list_videos", "get_video", "ask_video", "read_file", "list_dir",
+    for name in ("list_videos", "get_video", "search_library", "ask_video",
+                 "read_file", "list_dir",
                  "search_web", "summarize_video", "write_file", "edit_code",
                  "run_command", "download_model"):
         assert name in tools

@@ -24,6 +24,7 @@ class Config:
     device: str = "auto"
     language: str = ""
     top_k: int = 6
+    desktop_notify: bool = True
 
     @property
     def path(self) -> Path:

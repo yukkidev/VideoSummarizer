@@ -116,6 +116,9 @@ def build_tools(*, out_dir: str = "data") -> dict[str, Tool]:
     def get_video(video_id: str) -> dict[str, Any]:
         return api.get_video_record(video_id, out_dir=out_dir)
 
+    def search_library(query: str) -> list[dict[str, Any]]:
+        return api.search_library(query, out_dir=out_dir)["citations"]
+
     tools = [
         Tool(
             name="list_videos",
@@ -128,6 +131,16 @@ def build_tools(*, out_dir: str = "data") -> dict[str, Tool]:
             description="Get summary, transcript chunks, and metadata for a video id.",
             func=get_video,
             danger=SAFE,
+        ),
+        Tool(
+            name="search_library",
+            description=(
+                "Search transcript moments across every processed video by meaning; "
+                "hits cite video title and timestamp."
+            ),
+            func=search_library,
+            danger=SAFE,
+            params={"query": "string"},
         ),
         Tool(
             name="ask_video",

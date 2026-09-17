@@ -54,8 +54,18 @@
       </div>
     </section>
 
+    <section class="panel">
+      <h2>Playlists <button id="new-playlist" class="icon-btn small" title="Create a playlist">＋</button></h2>
+      <div id="playlist-list" class="playlist-list">
+        <p id="playlist-empty" class="muted">Group related videos to keep chats focused.</p>
+      </div>
+    </section>
+
     <section class="panel grow">
       <h2>Library <button id="reload-videos" class="icon-btn small" title="Reload">⟳</button></h2>
+      <button id="open-global" class="ghost-btn wide" title="Conversations across every video">
+        All videos · global chat
+      </button>
       <ul id="video-list" class="video-list"></ul>
     </section>
   </aside>
@@ -101,10 +111,32 @@
       </div>
 
       <div id="tab-qa" class="tab-panel">
+        <div class="chat-toolbar">
+          <select id="thread-select" title="Conversation thread"></select>
+          <button id="new-thread" class="ghost-btn small" title="Start a new conversation">New</button>
+          <button id="delete-thread" class="ghost-btn small" title="Delete this conversation">Delete</button>
+          <div id="scope-picker" class="scope-picker hidden">
+            <button id="scope-toggle" class="ghost-btn small" type="button" title="Which videos this global chat searches">
+              Scope: all videos ▾
+            </button>
+            <div id="scope-menu" class="scope-menu hidden">
+              <label class="scope-option"><input type="checkbox" id="scope-all" checked> All videos</label>
+              <div id="scope-playlists" class="scope-playlists"></div>
+              <button id="scope-apply" class="ghost-btn small" type="button">Apply scope</button>
+            </div>
+          </div>
+          <button id="context-btn" class="ghost-btn small" type="button" title="Context window usage">
+            Context
+          </button>
+          <div id="mode-toggle" class="mode-toggle" title="Ask = grounded in the video; Chat = free conversation">
+            <button type="button" data-mode="ask" class="active">Ask</button>
+            <button type="button" data-mode="chat">Chat</button>
+          </div>
+        </div>
         <div id="chat" class="chat"></div>
         <form id="ask-form" class="ask-form">
           <input id="ask-input" type="text" placeholder="Ask anything about this video…" required>
-          <button type="submit" id="ask-btn">Ask</button>
+          <button type="submit" id="ask-btn">Send</button>
         </form>
       </div>
 
@@ -114,6 +146,16 @@
       </div>
     </section>
   </main>
+</div>
+
+<div id="context-modal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h3>Context window</h3>
+      <button id="context-close" class="icon-btn small" type="button" title="Close">×</button>
+    </div>
+    <div id="context-body" class="context-body"></div>
+  </div>
 </div>
 
 <script src="/static/app.js"></script>

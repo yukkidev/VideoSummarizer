@@ -152,7 +152,9 @@ def test_api_video_detail(server):
     record = json.loads(body)
     assert record["title"] == "Test Video"
     assert len(record["chunks"]) == 2
-    assert record["answers"][0]["question"] == "q?"
+    assert record["answers"] == []
+    assert record["threads"][0]["title"] == "Earlier questions"
+    assert record["threads"][0]["message_count"] == 2
     assert record["media_url"] == "/media/vid1"
     assert record["transcript"]["source"] == "faster-whisper/tiny"
 
@@ -329,3 +331,176 @@ def test_unknown_job(server):
 def test_unknown_route(server):
     status, _, _ = request(f"{server}/nope")
     assert status == 404
+
+
+def test_create_and_list_video_threads(server):
+    status, _, body = request(
+        f"{server}/api/videos/vid1/threads", method="POST", payload={"mode": "chat"},
+    )
+    assert status == 201
+    thread = json.loads(body)
+    assert thread["scope"] == "video"
+    assert thread["video_id"] == "vid1"
+    assert thread["mode"] == "chat"
+
+    status, _, body = request(f"{server}/api/videos/vid1/threads")
+    assert status == 200
+    threads = json.loads(body)
+    titles = [t["title"] for t in threads]
+    assert "Earlier questions" in titles
+    assert any(t["thread_id"] == thread["thread_id"] for t in threads)
+
+
+def test_global_thread_create_message_and_delete(server, monkeypatch):
+    status, _, body = request(f"{server}/api/threads", method="POST", payload={"mode": "chat"})
+    assert status == 201
+    thread = json.loads(body)
+    assert thread["scope"] == "global"
+    assert thread["video_id"] == ""
+
+    def fake_post(thread_id, message, **kwargs):
+        return {
+            "thread": {"thread_id": thread_id, "title": message, "messages": []},
+            "message": {"role": "assistant", "content": "hi", "citations": []},
+        }
+
+    monkeypatch.setattr(gui.api, "post_message", fake_post)
+    status, _, body = request(
+        f"{server}/api/threads/{thread['thread_id']}/messages",
+        method="POST", payload={"message": "hello"},
+    )
+    assert status == 200
+    assert json.loads(body)["message"]["content"] == "hi"
+
+    status, _, body = request(f"{server}/api/threads/{thread['thread_id']}")
+    assert status == 200
+    assert json.loads(body)["thread_id"] == thread["thread_id"]
+
+    status, _, body = request(
+        f"{server}/api/threads/{thread['thread_id']}", method="DELETE",
+    )
+    assert json.loads(body)["deleted"] is True
+    status, _, _ = request(f"{server}/api/threads/{thread['thread_id']}")
+    assert status == 502
+
+
+def test_thread_message_requires_message(server):
+    created = json.loads(
+        request(f"{server}/api/threads", method="POST", payload={})[2]
+    )
+    status, _, _ = request(
+        f"{server}/api/threads/{created['thread_id']}/messages",
+        method="POST", payload={},
+    )
+    assert status == 400
+
+
+def test_search_endpoint(server, monkeypatch):
+    seen = {}
+
+    def fake_search(query, out_dir=None, top_k=None, playlist_ids=None):
+        seen["playlist_ids"] = playlist_ids
+        return {
+            "query": query, "citations": [{"video_id": "vid1", "start": 0.0}],
+        }
+
+    monkeypatch.setattr(gui.api, "search_library", fake_search)
+    status, _, body = request(f"{server}/api/search?q=hello&playlists=p1,p2")
+    assert status == 200
+    payload = json.loads(body)
+    assert payload["query"] == "hello"
+    assert payload["citations"][0]["video_id"] == "vid1"
+    assert seen["playlist_ids"] == ["p1", "p2"]
+
+    status, _, _ = request(f"{server}/api/search")
+    assert status == 400
+
+
+def test_playlist_endpoints(server):
+    status, _, body = request(
+        f"{server}/api/playlists", method="POST", payload={"name": "Physics"},
+    )
+    assert status == 201
+    playlist = json.loads(body)
+    playlist_id = playlist["playlist_id"]
+    assert playlist["video_count"] == 0
+
+    status, _, body = request(
+        f"{server}/api/playlists/{playlist_id}", method="PATCH",
+        payload={"add_video_ids": ["vid1"]},
+    )
+    assert status == 200
+    updated = json.loads(body)
+    assert updated["video_ids"] == ["vid1"]
+    assert updated["video_count"] == 1
+
+    status, _, body = request(f"{server}/api/playlists")
+    assert json.loads(body)[0]["name"] == "Physics"
+
+    status, _, body = request(
+        f"{server}/api/playlists/{playlist_id}", method="PATCH",
+        payload={"remove_video_ids": ["vid1"], "name": "Quantum"},
+    )
+    assert json.loads(body)["video_ids"] == []
+    assert json.loads(body)["name"] == "Quantum"
+
+    status, _, body = request(f"{server}/api/playlists/{playlist_id}", method="DELETE")
+    assert json.loads(body)["deleted"] is True
+
+    status, _, _ = request(f"{server}/api/playlists", method="POST", payload={})
+    assert status == 400
+
+
+def test_thread_patch_scope_and_mode(server):
+    created = json.loads(
+        request(f"{server}/api/threads", method="POST", payload={})[2]
+    )
+    playlist = json.loads(
+        request(f"{server}/api/playlists", method="POST", payload={"name": "P"})[2]
+    )
+    status, _, body = request(
+        f"{server}/api/threads/{created['thread_id']}", method="PATCH",
+        payload={"playlist_ids": [playlist["playlist_id"]], "mode": "chat", "title": "Scoped"},
+    )
+    assert status == 200
+    thread = json.loads(body)
+    assert thread["playlist_ids"] == [playlist["playlist_id"]]
+    assert thread["mode"] == "chat"
+    assert thread["title"] == "Scoped"
+
+
+def test_context_endpoint(server, monkeypatch):
+    monkeypatch.setattr(
+        gui.api, "context_status",
+        lambda thread_id=None, out_dir=None: {
+            "model": "m",
+            "loaded_context": 100000,
+            "max_context": 262144,
+            "thread_id": thread_id or "",
+        },
+    )
+    status, _, body = request(f"{server}/api/context?thread_id=t1")
+    assert status == 200
+    payload = json.loads(body)
+    assert payload["loaded_context"] == 100000
+    assert payload["thread_id"] == "t1"
+
+
+def test_job_manager_notifies_on_done(seeded: Path):
+    sent: list[str] = []
+    jobs = gui.JobManager(notify=sent.append)
+    job_id = jobs.create("process")
+    jobs.run(job_id, lambda progress: {"video_id": "v9", "title": "New Video"})
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        job = jobs.get(job_id)
+        if job and job["state"] == "done" and sent:
+            break
+        time.sleep(0.02)
+    assert jobs.get(job_id)["state"] == "done"
+    assert sent == ["Finished processing: New Video"]
+
+
+def test_quiet_app_state_disables_notifications(seeded: Path):
+    state = AppState(str(seeded), quiet=True)
+    assert state.jobs._notify is None

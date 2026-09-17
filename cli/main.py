@@ -61,6 +61,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_citation(citation: dict[str, Any]) -> None:
+    stamp = format_timestamp(citation.get("start", 0))
+    label = citation.get("video_title") or ""
+    prefix = f"{label} " if label else ""
+    print(f"  [{prefix}{stamp}] score={citation.get('score', 0):.2f} "
+          f"{(citation.get('text') or '')[:140]}")
+
+
 def _print_answer(payload: dict[str, Any]) -> None:
     answer = payload.get("answer") or {}
     video = payload.get("video") or {}
@@ -70,19 +78,34 @@ def _print_answer(payload: dict[str, Any]) -> None:
     if citations:
         print("Sources:")
         for citation in citations:
-            stamp = f"{format_timestamp(citation.get('start', 0))}"
-            print(f"  [{stamp}] score={citation.get('score', 0):.2f} "
-                  f"{citation.get('text', '')[:140]}")
+            _print_citation(citation)
     if video.get("video_path"):
         print(f"\nvideo file: {video['video_path']}")
 
 
+def _print_message(payload: dict[str, Any]) -> None:
+    thread = payload.get("thread") or {}
+    message = payload.get("message") or {}
+    print(f"\nA: {message.get('content')}\n")
+    for citation in message.get("citations") or []:
+        _print_citation(citation)
+    if thread.get("thread_id"):
+        title = thread.get("title") or "new conversation"
+        print(f"\nthread: {thread.get('thread_id')} — {title}")
+
+
 def cmd_ask(args: argparse.Namespace) -> int:
-    question = " ".join(args.question).strip()
-    if question:
+    ref = None if args.global_scope else args.ref
+    words = list(args.question)
+    if args.global_scope and args.ref:
+        words.insert(0, args.ref)
+    question = " ".join(words).strip()
+    mode = args.mode
+
+    if question and not args.thread and not args.new and not args.global_scope:
         try:
             payload = api.ask(
-                args.ref, question,
+                ref or "", question,
                 out_dir=args.out_dir, top_k=args.top_k, model=args.model,
                 progress=_progress_printer(args.quiet),
             )
@@ -95,7 +118,35 @@ def cmd_ask(args: argparse.Namespace) -> int:
             _print_answer(payload)
         return 0
 
-    print("Interactive Q&A. Type /quit to exit, /sources for last sources.\n")
+    try:
+        if args.thread:
+            thread = api.get_thread(args.thread, out_dir=args.out_dir)
+        else:
+            thread = api.create_thread(ref, mode=mode, out_dir=args.out_dir)
+    except LLMError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    thread_id = thread["thread_id"]
+
+    if question:
+        try:
+            payload = api.post_message(
+                thread_id, question, mode=mode, out_dir=args.out_dir,
+                top_k=args.top_k, model=args.model,
+                progress=_progress_printer(args.quiet),
+            )
+        except LLMError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if args.json:
+            _print_json(payload)
+        else:
+            _print_message(payload)
+        return 0
+
+    scope = "library" if ref is None else ref
+    print(f"Chat ({mode}) with {scope} — thread {thread_id}")
+    print("Commands: /mode ask|chat, /new, /threads, /thread <id>, /sources, /quit\n")
     last: dict[str, Any] | None = None
     while True:
         try:
@@ -108,22 +159,84 @@ def cmd_ask(args: argparse.Namespace) -> int:
         if line in ("/quit", "/exit", "/q"):
             return 0
         if line == "/sources" and last:
-            _print_answer(last)
+            _print_message(last)
+            continue
+        if line == "/new":
+            try:
+                thread = api.create_thread(ref, mode=mode, out_dir=args.out_dir)
+            except LLMError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                continue
+            thread_id = thread["thread_id"]
+            print(f"new thread {thread_id}\n")
+            continue
+        if line == "/threads":
+            try:
+                threads = api.list_threads(ref, out_dir=args.out_dir)
+            except LLMError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                continue
+            for entry in threads:
+                marker = "*" if entry.get("thread_id") == thread_id else " "
+                print(f" {marker} {entry.get('thread_id')}  "
+                      f"{(entry.get('title') or 'new conversation')[:50]}")
+            print()
+            continue
+        if line.startswith("/thread "):
+            wanted = line.split(None, 1)[1].strip()
+            try:
+                api.get_thread(wanted, out_dir=args.out_dir)
+            except LLMError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                continue
+            thread_id = wanted
+            print(f"switched to {wanted}\n")
+            continue
+        if line.startswith("/mode"):
+            parts = line.split()
+            if len(parts) == 2 and parts[1] in ("ask", "chat"):
+                mode = parts[1]
+                print(f"mode: {mode}\n")
+            else:
+                print("usage: /mode ask|chat\n")
             continue
         try:
-            last = api.ask(
-                args.ref, line,
-                out_dir=args.out_dir, top_k=args.top_k, model=args.model,
+            last = api.post_message(
+                thread_id, line, mode=mode, out_dir=args.out_dir,
+                top_k=args.top_k, model=args.model,
             )
         except LLMError as exc:
             print(f"error: {exc}", file=sys.stderr)
             continue
-        answer = last.get("answer") or {}
-        print(f"\n{answer.get('answer')}\n")
-        for citation in answer.get("citations") or []:
+        message = last.get("message") or {}
+        print(f"\n{message.get('content')}\n")
+        for citation in message.get("citations") or []:
             stamp = format_timestamp(citation.get("start", 0))
-            print(f"  [{stamp}] {citation.get('text', '')[:120]}")
+            label = citation.get("video_title") or ""
+            prefix = f"{label} " if label else ""
+            print(f"  [{prefix}{stamp}] {(citation.get('text') or '')[:120]}")
         print()
+
+
+def cmd_threads(args: argparse.Namespace) -> int:
+    ref = None if args.global_scope else args.ref
+    try:
+        threads = api.list_threads(ref, out_dir=args.out_dir)
+    except LLMError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        _print_json(threads)
+        return 0
+    if not threads:
+        print("no conversations yet")
+        return 0
+    for thread in threads:
+        where = thread.get("video_id") if thread.get("scope") == "video" else "global"
+        print(f"{thread.get('thread_id', ''):<14} {str(where):<14} "
+              f"{(thread.get('title') or 'new conversation')[:50]:<52} "
+              f"{thread.get('message_count', 0)} msgs")
+    return 0
 
 
 def cmd_list(args: argparse.Namespace) -> int:
@@ -230,14 +343,26 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--quiet", action="store_true")
     run_p.set_defaults(func=cmd_run)
 
-    ask_p = sub.add_parser("ask", parents=[common], help="ask questions about a processed video")
-    ask_p.add_argument("ref", help="video id, data dir, or URL")
+    ask_p = sub.add_parser("ask", parents=[common], help="ask questions or chat about a video")
+    ask_p.add_argument("ref", nargs="?", help="video id, data dir, or URL (omit with --global)")
     ask_p.add_argument("question", nargs="*")
+    ask_p.add_argument("--thread", help="continue an existing conversation thread")
+    ask_p.add_argument("--new", action="store_true", help="start a new conversation thread")
+    ask_p.add_argument("--global", dest="global_scope", action="store_true",
+                       help="talk to the whole library instead of a single video")
+    ask_p.add_argument("--mode", choices=("ask", "chat"), default="ask",
+                       help="ask = strictly grounded; chat = conversational")
     ask_p.add_argument("--top-k", type=int)
     ask_p.add_argument("--model")
     ask_p.add_argument("--json", action="store_true")
     ask_p.add_argument("--quiet", action="store_true")
     ask_p.set_defaults(func=cmd_ask)
+
+    threads_p = sub.add_parser("threads", parents=[common], help="list conversation threads")
+    threads_p.add_argument("ref", nargs="?", help="video id or data dir (omit with --global)")
+    threads_p.add_argument("--global", dest="global_scope", action="store_true")
+    threads_p.add_argument("--json", action="store_true")
+    threads_p.set_defaults(func=cmd_threads)
 
     list_p = sub.add_parser("list", parents=[common], help="list processed videos")
     list_p.add_argument("--json", action="store_true")

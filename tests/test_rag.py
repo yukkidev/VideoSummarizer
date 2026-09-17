@@ -3,14 +3,18 @@ from __future__ import annotations
 import pytest
 
 from pipeline.llm import OllamaClient
-from pipeline.models import Chunk, Video
+from pipeline.models import ChatMessage, Chunk, Citation, Video
 from pipeline.rag import (
     QUERY_PREFIX,
     answer_question,
+    build_reply_prompt,
     build_vectors,
     cosine,
     format_context,
+    format_global_context,
+    generate_reply,
     search,
+    trim_history,
 )
 
 
@@ -22,6 +26,7 @@ class FakeEmbedLLM:
         self.vectors = vectors
         self.embed_calls = []
         self.generate_calls = []
+        self.chat_calls = []
 
     def embed(self, texts, model=None, timeout=None):
         self.embed_calls.append((list(texts), model))
@@ -35,6 +40,10 @@ class FakeEmbedLLM:
 
     def generate(self, prompt, **kwargs):
         self.generate_calls.append((prompt, kwargs))
+        return "Because of X [00:05]. See also Y [00:15]."
+
+    def chat(self, messages, **kwargs):
+        self.chat_calls.append((list(messages), kwargs))
         return "Because of X [00:05]. See also Y [00:15]."
 
 
@@ -102,7 +111,7 @@ def test_answer_question_with_fake_llm():
     assert answer.video_id == "v1"
     assert "[00:05]" in answer.answer
     assert len(answer.citations) == 1
-    assert "cats are great" in llm.generate_calls[0][0]
+    assert "cats are great" in llm.chat_calls[0][0][1]["content"]
 
 
 def test_answer_question_no_chunks():
@@ -125,3 +134,48 @@ def test_answer_question_builds_vectors_when_missing():
 def test_ollama_client_generate_override_matches_fake_interface():
     client = OllamaClient(generate=lambda prompt, **kw: "ok")
     assert client.generate("hi") == "ok"
+
+
+def test_trim_history_keeps_recent_within_budget():
+    messages = [
+        ChatMessage(role="user", content="old " * 200),
+        ChatMessage(role="assistant", content="mid"),
+        ChatMessage(role="user", content="new"),
+    ]
+    trimmed = trim_history(messages, max_messages=2, max_chars=100)
+    assert trimmed[-1] == {"role": "user", "content": "new"}
+    assert len(trimmed) <= 2
+    assert trim_history([]) == []
+
+
+def test_generate_reply_chat_mode_includes_history_and_uses_chat_temperature():
+    llm = FakeEmbedLLM({})
+    history = [
+        ChatMessage(role="user", content="what is X?"),
+        ChatMessage(role="assistant", content="X is Y [00:10]."),
+    ]
+    video = Video(video_id="v", url="u", title="T", author="A")
+    reply = generate_reply(
+        "tell me more", mode="chat", history=history,
+        citations=[Citation(0, 5.0, 10.0, "X is Y.")], llm=llm, video=video,
+    )
+    assert reply
+    messages, kwargs = llm.chat_calls[0]
+    assert messages[0]["role"] == "system"
+    assert messages[1] == {"role": "user", "content": "what is X?"}
+    assert messages[2]["role"] == "assistant"
+    assert messages[-1]["role"] == "user"
+    assert "tell me more" in messages[-1]["content"]
+    assert kwargs["temperature"] == 0.4
+
+
+def test_build_reply_prompt_labels_global_videos():
+    citations = [Citation(0, 5.0, 10.0, "hello", video_id="v1", video_title="Talk")]
+    prompt = build_reply_prompt("q", citations, mode="chat", global_scope=True)
+    assert "[Talk @ 00:05-00:10] hello" in prompt
+    assert "whole video library" in prompt
+
+
+def test_format_global_context_without_title():
+    citations = [Citation(0, 5.0, 10.0, "hello")]
+    assert format_global_context(citations) == "[00:05-00:10] hello"

@@ -5,6 +5,15 @@ const $ = (id) => document.getElementById(id);
 const state = {
   currentVideo: null,
   videoId: null,
+  scope: "video",
+  threads: [],
+  threadId: null,
+  currentThread: null,
+  playlists: [],
+  videoList: [],
+  expandedPlaylists: new Set(),
+  context: null,
+  mode: "ask",
   jobTimer: null,
   models: null,
 };
@@ -65,6 +74,345 @@ function seekTo(seconds) {
   player.currentTime = seconds;
   player.play().catch(() => {});
   player.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+// ---------- notifications ---------------------------------------------------
+
+function requestNotifyPermission() {
+  if (!("Notification" in window)) return;
+  if (Notification.permission === "default") {
+    Notification.requestPermission().catch(() => {});
+  }
+}
+
+function notifyFinished(job) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  const result = (job && job.result) || {};
+  let body = "Processing finished";
+  if (job && job.kind === "pull") {
+    body = `Finished pulling ${result.model || "model"}`;
+  } else if (result.title) {
+    body = `Finished processing: ${result.title}`;
+  } else if (result.video_id) {
+    body = `Finished processing ${result.video_id}`;
+  }
+  try {
+    new Notification("VideoSummarizer", { body });
+  } catch {
+    // notifications are best-effort
+  }
+}
+
+// ---------- playlists -------------------------------------------------------
+
+function videoTitle(videoId) {
+  const video = state.videoList.find((v) => v.video_id === videoId);
+  return video ? (video.title || videoId) : videoId;
+}
+
+async function loadPlaylists() {
+  try {
+    state.playlists = await apiFetch("/api/playlists");
+  } catch {
+    state.playlists = [];
+  }
+  renderPlaylists();
+  renderScope();
+}
+
+function renderPlaylists() {
+  const list = $("playlist-list");
+  list.innerHTML = "";
+  if (!state.playlists.length) {
+    const hint = document.createElement("p");
+    hint.className = "muted";
+    hint.textContent = "Group related videos to keep chats focused.";
+    list.appendChild(hint);
+    return;
+  }
+  state.playlists.forEach((playlist) => {
+    const item = document.createElement("div");
+    item.className = "playlist";
+    const head = document.createElement("div");
+    head.className = "playlist-head";
+
+    const expanded = state.expandedPlaylists.has(playlist.playlist_id);
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "playlist-toggle";
+    toggle.textContent = `${expanded ? "▾" : "▸"} ${playlist.name} (${playlist.video_ids.length})`;
+    toggle.title = "Expand / collapse";
+    toggle.addEventListener("click", () => {
+      if (expanded) state.expandedPlaylists.delete(playlist.playlist_id);
+      else state.expandedPlaylists.add(playlist.playlist_id);
+      renderPlaylists();
+    });
+    head.appendChild(toggle);
+
+    const addCurrent = document.createElement("button");
+    addCurrent.type = "button";
+    addCurrent.className = "icon-btn small";
+    addCurrent.textContent = "＋";
+    addCurrent.title = "Add the current video to this playlist";
+    addCurrent.disabled = !state.videoId || playlist.video_ids.includes(state.videoId);
+    addCurrent.addEventListener("click", () => addVideoToPlaylist(playlist.playlist_id, state.videoId));
+    head.appendChild(addCurrent);
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "icon-btn small";
+    remove.textContent = "×";
+    remove.title = "Delete playlist (videos stay in the library)";
+    remove.addEventListener("click", () => deletePlaylist(playlist.playlist_id, playlist.name));
+    head.appendChild(remove);
+    item.appendChild(head);
+
+    if (expanded) {
+      const body = document.createElement("div");
+      body.className = "playlist-body";
+
+      if (!playlist.video_ids.length) {
+        const empty = document.createElement("p");
+        empty.className = "muted";
+        empty.textContent = "No videos yet.";
+        body.appendChild(empty);
+      }
+      playlist.video_ids.forEach((videoId) => {
+        const row = document.createElement("div");
+        row.className = "playlist-video";
+        const open = document.createElement("button");
+        open.type = "button";
+        open.className = "playlist-video-open";
+        open.textContent = videoTitle(videoId);
+        open.title = videoId;
+        open.addEventListener("click", () => openVideo(videoId));
+        row.appendChild(open);
+        const drop = document.createElement("button");
+        drop.type = "button";
+        drop.className = "icon-btn small";
+        drop.textContent = "×";
+        drop.title = "Remove from playlist";
+        drop.addEventListener("click", () => removeVideoFromPlaylist(playlist.playlist_id, videoId));
+        row.appendChild(drop);
+        body.appendChild(row);
+      });
+
+      const select = document.createElement("select");
+      select.className = "playlist-add-select";
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "Add video…";
+      select.appendChild(placeholder);
+      state.videoList
+        .filter((video) => !playlist.video_ids.includes(video.video_id))
+        .forEach((video) => {
+          const option = document.createElement("option");
+          option.value = video.video_id;
+          option.textContent = video.title || video.video_id;
+          select.appendChild(option);
+        });
+      select.addEventListener("change", () => {
+        if (select.value) addVideoToPlaylist(playlist.playlist_id, select.value);
+      });
+      body.appendChild(select);
+      item.appendChild(body);
+    }
+    list.appendChild(item);
+  });
+}
+
+async function createPlaylist() {
+  const name = prompt("Playlist name (e.g. Quantum mechanics):");
+  if (!name || !name.trim()) return;
+  try {
+    const playlist = await apiFetch("/api/playlists", {
+      method: "POST",
+      body: JSON.stringify({ name: name.trim() }),
+    });
+    state.expandedPlaylists.add(playlist.playlist_id);
+    await loadPlaylists();
+  } catch (error) {
+    alert(`Could not create playlist: ${error.message}`);
+  }
+}
+
+async function deletePlaylist(playlistId, name) {
+  if (!confirm(`Delete playlist "${name}"? The videos stay in your library.`)) return;
+  await apiFetch(`/api/playlists/${playlistId}`, { method: "DELETE" });
+  state.expandedPlaylists.delete(playlistId);
+  await loadPlaylists();
+}
+
+async function addVideoToPlaylist(playlistId, videoId) {
+  if (!videoId) return;
+  await apiFetch(`/api/playlists/${playlistId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ add_video_ids: [videoId] }),
+  });
+  await loadPlaylists();
+}
+
+async function removeVideoFromPlaylist(playlistId, videoId) {
+  await apiFetch(`/api/playlists/${playlistId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ remove_video_ids: [videoId] }),
+  });
+  await loadPlaylists();
+}
+
+// ---------- global chat scope ----------------------------------------------
+
+function scopeSummary() {
+  const ids = (state.currentThread && state.currentThread.playlist_ids) || [];
+  if (!ids.length) return "all videos";
+  const selected = state.playlists.filter((p) => ids.includes(p.playlist_id));
+  const videos = new Set();
+  selected.forEach((p) => p.video_ids.forEach((v) => videos.add(v)));
+  const names = selected.map((p) => p.name);
+  const label = names.length <= 2 ? names.join(", ") : `${names.length} playlists`;
+  return `${label} · ${videos.size} video${videos.size === 1 ? "" : "s"}`;
+}
+
+function renderScope() {
+  const picker = $("scope-picker");
+  if (!picker) return;
+  picker.classList.toggle("hidden", state.scope !== "global");
+  $("scope-toggle").textContent = `Scope: ${scopeSummary()} ▾`;
+
+  const ids = (state.currentThread && state.currentThread.playlist_ids) || [];
+  const all = $("scope-all");
+  all.checked = ids.length === 0;
+  const container = $("scope-playlists");
+  container.innerHTML = "";
+  if (!state.playlists.length) {
+    const hint = document.createElement("p");
+    hint.className = "muted";
+    hint.textContent = "No playlists yet.";
+    container.appendChild(hint);
+    return;
+  }
+  state.playlists.forEach((playlist) => {
+    const label = document.createElement("label");
+    label.className = "scope-option";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = playlist.playlist_id;
+    box.checked = ids.includes(playlist.playlist_id);
+    box.disabled = all.checked;
+    label.appendChild(box);
+    const text = document.createElement("span");
+    text.textContent = `${playlist.name} (${playlist.video_ids.length})`;
+    label.appendChild(text);
+    container.appendChild(label);
+  });
+}
+
+async function applyScope() {
+  if (!state.currentThread) return;
+  const ids = $("scope-all").checked
+    ? []
+    : Array.from($("scope-playlists").querySelectorAll("input:checked"))
+        .map((box) => box.value);
+  try {
+    state.currentThread = await apiFetch(`/api/threads/${state.threadId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ playlist_ids: ids }),
+    });
+  } catch (error) {
+    alert(`Could not update scope: ${error.message}`);
+    return;
+  }
+  $("scope-menu").classList.add("hidden");
+  renderScope();
+}
+
+// ---------- context window --------------------------------------------------
+
+function fmtTokens(value) {
+  return (value || 0).toLocaleString();
+}
+
+function contextLimitValue(context) {
+  return (context && (context.context_limit || context.loaded_context || context.max_context)) || 0;
+}
+
+function contextUsed(context) {
+  if (!context) return 0;
+  return context.prompt_tokens || context.thread_tokens || 0;
+}
+
+function renderContext(context) {
+  if (context) state.context = context;
+  const ctx = state.context;
+  if (!ctx) return;
+  const limit = contextLimitValue(ctx);
+  const used = contextUsed(ctx);
+  const pct = limit ? Math.min(100, Math.round((used / limit) * 100)) : 0;
+  $("context-btn").textContent = limit && used ? `Context ${pct}%` : "Context";
+
+  const body = $("context-body");
+  body.innerHTML = "";
+  const rows = [
+    ["Model", ctx.model || "—"],
+    [
+      "Context loaded by Ollama",
+      ctx.loaded_context
+        ? `${fmtTokens(ctx.loaded_context)} tokens`
+        : "not loaded yet — send a message first",
+    ],
+    [
+      "Model maximum",
+      ctx.max_context ? `${fmtTokens(ctx.max_context)} tokens` : "unknown",
+    ],
+    [
+      "Last request",
+      ctx.prompt_tokens
+        ? `${fmtTokens(ctx.prompt_tokens)} prompt + ${fmtTokens(ctx.eval_tokens)} generated`
+        : "no replies yet",
+    ],
+    [
+      "Conversation estimate",
+      `~${fmtTokens(ctx.thread_tokens)} tokens · ${ctx.thread_messages} messages`,
+    ],
+  ];
+  rows.forEach(([label, value]) => {
+    const row = document.createElement("div");
+    row.className = "context-row";
+    const left = document.createElement("span");
+    left.className = "context-label";
+    left.textContent = label;
+    const right = document.createElement("span");
+    right.className = "context-value";
+    right.textContent = value;
+    row.appendChild(left);
+    row.appendChild(right);
+    body.appendChild(row);
+  });
+
+  const bar = document.createElement("div");
+  bar.className = "progress context-bar";
+  const fill = document.createElement("div");
+  fill.className = "progress-fill";
+  fill.style.width = `${pct}%`;
+  if (pct > 85) fill.style.background = "var(--bad)";
+  bar.appendChild(fill);
+  body.appendChild(bar);
+
+  const note = document.createElement("p");
+  note.className = "muted";
+  note.textContent = pct
+    ? `${pct}% of the loaded window used by the last request.`
+    : "Token counts come from Ollama's last reply plus a 4-chars-per-token estimate.";
+  body.appendChild(note);
+}
+
+async function refreshContext() {
+  try {
+    const query = state.threadId ? `?thread_id=${state.threadId}` : "";
+    renderContext(await apiFetch(`/api/context${query}`));
+  } catch {
+    // context display is best-effort
+  }
 }
 
 // ---------- models ----------------------------------------------------------
@@ -135,7 +483,7 @@ async function pullModel() {
     });
     showJob(`pulling ${name}`);
     pollJob(job_id, {
-      onDone: async () => { await refreshModels(); },
+      onDone: async (job) => { notifyFinished(job); await refreshModels(); },
       onError: (message) => showJobError(message),
     });
   } catch (error) {
@@ -193,6 +541,8 @@ function videoFlags(video) {
 
 async function loadVideos() {
   const videos = await apiFetch("/api/videos");
+  state.videoList = videos;
+  renderPlaylists();
   const list = $("video-list");
   list.innerHTML = "";
   if (!videos.length) {
@@ -219,11 +569,17 @@ async function openVideo(videoId) {
   const record = await apiFetch(`/api/videos/${videoId}`);
   state.currentVideo = record;
   state.videoId = videoId;
+  state.scope = "video";
   document.querySelectorAll("#video-list li").forEach((li) => {
     li.classList.toggle("active", li.dataset.id === videoId);
   });
   $("empty-state").classList.add("hidden");
   $("detail").classList.remove("hidden");
+  $("detail").classList.remove("scope-global");
+  $("delete-video").classList.remove("hidden");
+  document.querySelectorAll(".tabs .tab").forEach((tab) => {
+    tab.classList.remove("hidden");
+  });
   $("video-title").textContent = record.title || videoId;
   const meta = [];
   if (record.author) meta.push(record.author);
@@ -251,9 +607,38 @@ async function openVideo(videoId) {
   renderSummary(record.summary);
   renderQuestions(record.summary);
   renderTranscript(record);
-  renderChat(record.answers || []);
   switchTab("summary");
+  renderPlaylists();
+  await loadThreads();
   loadVideos();
+}
+
+async function openGlobal() {
+  state.scope = "global";
+  state.videoId = null;
+  state.currentVideo = null;
+  document.querySelectorAll("#video-list li").forEach((li) => {
+    li.classList.remove("active");
+  });
+  $("empty-state").classList.add("hidden");
+  $("detail").classList.remove("hidden");
+  $("detail").classList.add("scope-global");
+  $("delete-video").classList.add("hidden");
+  document.querySelectorAll(".tabs .tab").forEach((tab) => {
+    tab.classList.toggle("hidden", tab.dataset.tab !== "qa");
+  });
+  $("video-title").textContent = "All videos";
+  $("video-meta").textContent = "conversations across your whole library";
+  const player = $("player");
+  player.pause();
+  player.removeAttribute("src");
+  player.dataset.current = "";
+  player.classList.add("hidden");
+  $("no-media").classList.add("hidden");
+  setMode("chat");
+  switchTab("qa");
+  renderPlaylists();
+  await loadThreads();
 }
 
 function renderSummary(summary) {
@@ -312,14 +697,81 @@ function renderTranscript(record) {
   }
 }
 
-function renderChat(answers) {
+function threadUrl(suffix = "") {
+  return state.scope === "global"
+    ? `/api/threads${suffix}`
+    : `/api/videos/${state.videoId}/threads${suffix}`;
+}
+
+function summarizeThread(thread) {
+  return {
+    thread_id: thread.thread_id,
+    title: thread.title,
+    mode: thread.mode,
+    message_count: (thread.messages || []).length,
+  };
+}
+
+async function loadThreads(preferredId = null) {
+  state.threads = await apiFetch(threadUrl());
+  if (!state.threads.length) {
+    const created = await apiFetch(threadUrl(), {
+      method: "POST",
+      body: JSON.stringify({ mode: state.mode }),
+    });
+    state.threads = [summarizeThread(created)];
+  }
+  const select = $("thread-select");
+  select.innerHTML = "";
+  state.threads.forEach((thread) => {
+    const option = document.createElement("option");
+    option.value = thread.thread_id;
+    option.textContent = thread.title || "New conversation";
+    select.appendChild(option);
+  });
+  const wanted = preferredId && state.threads.some((t) => t.thread_id === preferredId)
+    ? preferredId
+    : state.threads[0].thread_id;
+  select.value = wanted;
+  await loadThread(wanted);
+}
+
+async function loadThread(threadId) {
+  const thread = await apiFetch(`/api/threads/${threadId}`);
+  state.threadId = threadId;
+  state.currentThread = thread;
+  setMode(thread.mode || "ask");
+  renderScope();
+  renderChat(thread.messages || []);
+  refreshContext();
+}
+
+function setMode(mode) {
+  state.mode = mode === "chat" ? "chat" : "ask";
+  document.querySelectorAll("#mode-toggle button").forEach((button) => {
+    button.classList.toggle("active", button.dataset.mode === state.mode);
+  });
+}
+
+function renderChat(messages) {
   const chat = $("chat");
   chat.innerHTML = "";
-  answers.forEach((entry) => {
-    appendMessage("user", entry.question);
-    appendBot(entry.answer, entry.citations || []);
+  if (!messages.length) {
+    const hint = document.createElement("div");
+    hint.className = "msg muted";
+    hint.textContent = state.scope === "global"
+      ? "Ask across everything you've downloaded — answers cite the video and moment."
+      : "Ask a question, or just talk through what you're learning.";
+    chat.appendChild(hint);
+    return;
+  }
+  messages.forEach((message) => {
+    if (message.role === "user") {
+      appendMessage("user", message.content);
+    } else {
+      appendBot(message.content, message.citations || []);
+    }
   });
-  chat.scrollTop = chat.scrollHeight;
 }
 
 function appendMessage(kind, text) {
@@ -330,6 +782,25 @@ function appendMessage(kind, text) {
   chat.appendChild(div);
   chat.scrollTop = chat.scrollHeight;
   return div;
+}
+
+function citationLabel(citation) {
+  const stamp = fmtTime(citation.start);
+  if (citation.video_title && citation.video_id && citation.video_id !== state.videoId) {
+    const title = citation.video_title.length > 26
+      ? citation.video_title.slice(0, 26) + "…"
+      : citation.video_title;
+    return `${title} · ${stamp}`;
+  }
+  return `${stamp} (${Math.round((citation.score || 0) * 100)}%)`;
+}
+
+function openCitation(citation) {
+  if (citation.video_id && citation.video_id !== state.videoId) {
+    openVideo(citation.video_id).then(() => seekTo(citation.start));
+  } else {
+    seekTo(citation.start);
+  }
 }
 
 function appendBot(text, citations) {
@@ -343,9 +814,9 @@ function appendBot(text, citations) {
     citations.forEach((citation) => {
       const chip = document.createElement("button");
       chip.className = "citation-chip";
-      chip.textContent = `${fmtTime(citation.start)} (${Math.round((citation.score || 0) * 100)}%)`;
+      chip.textContent = citationLabel(citation);
       chip.title = citation.text;
-      chip.addEventListener("click", () => seekTo(citation.start));
+      chip.addEventListener("click", () => openCitation(citation));
       row.appendChild(chip);
     });
     div.appendChild(row);
@@ -381,11 +852,73 @@ function bindEvents() {
   $("refresh-models").addEventListener("click", refreshModels);
   $("pull-model").addEventListener("click", pullModel);
   $("model-select").addEventListener("change", (event) => switchModel(event.target.value));
+  $("open-global").addEventListener("click", openGlobal);
+
+  $("thread-select").addEventListener("change", (event) => loadThread(event.target.value));
+
+  document.querySelectorAll("#mode-toggle button").forEach((button) => {
+    button.addEventListener("click", () => setMode(button.dataset.mode));
+  });
+
+  $("new-playlist").addEventListener("click", createPlaylist);
+
+  $("scope-toggle").addEventListener("click", (event) => {
+    event.stopPropagation();
+    $("scope-menu").classList.toggle("hidden");
+  });
+
+  $("scope-all").addEventListener("change", (event) => {
+    const disabled = event.target.checked;
+    $("scope-playlists").querySelectorAll("input").forEach((box) => {
+      box.disabled = disabled;
+      if (disabled) box.checked = false;
+    });
+  });
+
+  $("scope-apply").addEventListener("click", applyScope);
+
+  document.addEventListener("click", (event) => {
+    if ($("scope-menu") && !event.target.closest("#scope-picker")) {
+      $("scope-menu").classList.add("hidden");
+    }
+  });
+
+  $("context-btn").addEventListener("click", () => {
+    $("context-modal").classList.remove("hidden");
+    refreshContext();
+  });
+
+  $("context-close").addEventListener("click", () => {
+    $("context-modal").classList.add("hidden");
+  });
+
+  $("context-modal").addEventListener("click", (event) => {
+    if (event.target === $("context-modal")) {
+      $("context-modal").classList.add("hidden");
+    }
+  });
+
+  $("new-thread").addEventListener("click", async () => {
+    const created = await apiFetch(threadUrl(), {
+      method: "POST",
+      body: JSON.stringify({ mode: state.mode }),
+    });
+    await loadThreads(created.thread_id);
+  });
+
+  $("delete-thread").addEventListener("click", async () => {
+    if (!state.threadId) return;
+    if (!confirm("Delete this conversation?")) return;
+    await apiFetch(`/api/threads/${state.threadId}`, { method: "DELETE" });
+    state.threadId = null;
+    await loadThreads();
+  });
 
   $("add-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const url = $("url-input").value.trim();
     if (!url) return;
+    requestNotifyPermission();
     $("add-btn").disabled = true;
     showJob("starting download…");
     try {
@@ -402,6 +935,7 @@ function bindEvents() {
       });
       pollJob(job_id, {
         onDone: async (job) => {
+          notifyFinished(job);
           $("add-btn").disabled = false;
           $("url-input").value = "";
           await loadVideos();
@@ -426,24 +960,31 @@ function bindEvents() {
     state.videoId = null;
     state.currentVideo = null;
     await loadVideos();
+    await loadPlaylists();
   });
 
   $("ask-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const question = $("ask-input").value.trim();
-    if (!question || !state.videoId) return;
+    if (!question || !state.threadId) return;
     $("ask-input").value = "";
     $("ask-btn").disabled = true;
     appendMessage("user", question);
-    const pending = appendMessage("bot pending", "searching the transcript…");
+    const pending = appendMessage("bot pending", "thinking…");
     try {
-      const payload = await apiFetch(`/api/videos/${state.videoId}/ask`, {
+      const payload = await apiFetch(`/api/threads/${state.threadId}/messages`, {
         method: "POST",
-        body: JSON.stringify({ question }),
+        body: JSON.stringify({ message: question, mode: state.mode }),
       });
       pending.remove();
-      const answer = payload.answer || {};
-      appendBot(answer.answer || "", answer.citations || []);
+      const message = payload.message || {};
+      appendBot(message.content || "", message.citations || []);
+      if (payload.context) renderContext(payload.context);
+      const thread = payload.thread || {};
+      if (thread.title) {
+        const option = $("thread-select").selectedOptions[0];
+        if (option) option.textContent = thread.title;
+      }
     } catch (error) {
       pending.remove();
       appendBot(`Error: ${error.message}`, []);
@@ -464,6 +1005,7 @@ async function init() {
   bindEvents();
   await refreshModels();
   await loadVideos();
+  await loadPlaylists();
   setInterval(refreshModels, 30000);
 }
 

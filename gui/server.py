@@ -10,9 +10,24 @@ POST /api/models/current        switch the active model
 POST /api/models/pull           pull a model (background job)
 GET  /api/videos                list processed videos
 POST /api/videos                process a URL (background job)
-GET  /api/videos/<id>           full record (metadata, summary, chunks, answers)
+GET  /api/videos/<id>           full record (metadata, summary, chunks, threads)
 DELETE /api/videos/<id>         delete a video and its artifacts
-POST /api/videos/<id>/ask       ask a question (blocking)
+POST /api/videos/<id>/ask       ask a question (blocking, stateless)
+GET  /api/videos/<id>/threads   list conversation threads for a video
+POST /api/videos/<id>/threads   create a video conversation thread
+GET  /api/threads               list global (library-wide) threads
+POST /api/threads               create a global thread
+GET  /api/threads/<id>          full thread with messages
+PATCH /api/threads/<id>         edit title, mode, or playlist scope
+DELETE /api/threads/<id>        delete a thread
+POST /api/threads/<id>/messages append a message and get a reply (blocking)
+GET  /api/playlists             list playlists with their video ids
+POST /api/playlists             create a playlist
+GET  /api/playlists/<id>        one playlist
+PATCH /api/playlists/<id>       rename, add, or remove videos
+DELETE /api/playlists/<id>      delete a playlist
+GET  /api/context?thread_id=    context-window usage from Ollama
+GET  /api/search?q=<query>      rank moments across every processed video
 GET  /api/jobs/<id>             job status/progress
 GET  /media/<id>               video or audio stream with HTTP Range
 """
@@ -25,13 +40,15 @@ import re
 import threading
 import uuid
 import webbrowser
+from collections.abc import Callable
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
+from gui import notify
 from pipeline import api, store
 from pipeline.config import Config
 from pipeline.llm import LLMError
@@ -46,12 +63,15 @@ MEDIA_TYPES = {
 }
 CHUNK_SIZE = 1024 * 256
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_\-.]{1,128}$")
+THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_\-.]{1,64}$")
+PLAYLIST_ID_RE = re.compile(r"^[A-Za-z0-9_\-.]{1,64}$")
 
 
 class JobManager:
-    def __init__(self) -> None:
+    def __init__(self, notify: Callable[[str], None] | None = None) -> None:
         self._jobs: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
+        self._notify = notify
 
     def create(self, kind: str) -> str:
         job_id = uuid.uuid4().hex[:12]
@@ -101,6 +121,7 @@ class JobManager:
                 self.update(
                     job_id, state="done", message="done", fraction=1.0, result=result,
                 )
+                self._notify_done(job_id)
             except Exception as exc:  # noqa: BLE001 - surfaced to the UI
                 self.update(
                     job_id, state="error", message=str(exc), error=str(exc),
@@ -108,12 +129,34 @@ class JobManager:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _notify_done(self, job_id: str) -> None:
+        if self._notify is None:
+            return
+        job = self.get(job_id) or {}
+        result = job.get("result") or {}
+        kind = job.get("kind")
+        if kind == "process":
+            label = result.get("title") or result.get("video_id") or "video"
+            message = f"Finished processing: {label}"
+        elif kind == "pull":
+            message = f"Finished pulling {result.get('model', 'model')}"
+        else:
+            message = "Finished"
+        try:
+            self._notify(message)
+        except Exception:  # noqa: BLE001 - notifications must never break jobs
+            pass
+
 
 class AppState:
     def __init__(self, out_dir: str, *, quiet: bool = False) -> None:
         self.out_dir = out_dir
         self.quiet = quiet
-        self.jobs = JobManager()
+        self.jobs = JobManager(notify=None if quiet else self._desktop_notify)
+
+    def _desktop_notify(self, message: str) -> None:
+        cfg = self.config
+        notify.desktop_notify("VideoSummarizer", message, enabled=cfg.desktop_notify)
 
     @property
     def config(self) -> Config:
@@ -283,11 +326,62 @@ def make_handler(state: AppState):
                 self._send_json(api.list_videos(out_dir=state.out_dir))
                 return
             if path.startswith("/api/videos/"):
-                video_id = unquote(path[len("/api/videos/"):])
+                rest = unquote(path[len("/api/videos/"):])
+                if rest.endswith("/threads"):
+                    video_id = rest[: -len("/threads")]
+                    if not VIDEO_ID_RE.match(video_id):
+                        self._error(HTTPStatus.BAD_REQUEST, "bad video id")
+                        return
+                    self._send_json(api.list_threads(video_id, out_dir=state.out_dir))
+                    return
+                video_id = rest
                 if not VIDEO_ID_RE.match(video_id):
                     self._error(HTTPStatus.BAD_REQUEST, "bad video id")
                     return
                 self._send_json(self._video_detail(video_id))
+                return
+            if path == "/api/threads":
+                self._send_json(api.list_threads(out_dir=state.out_dir))
+                return
+            if path == "/api/playlists":
+                self._send_json(api.list_playlists(out_dir=state.out_dir))
+                return
+            if path.startswith("/api/playlists/"):
+                playlist_id = unquote(path[len("/api/playlists/"):])
+                if not PLAYLIST_ID_RE.match(playlist_id):
+                    self._error(HTTPStatus.BAD_REQUEST, "bad playlist id")
+                    return
+                self._send_json(api.get_playlist(playlist_id, out_dir=state.out_dir))
+                return
+            if path == "/api/context":
+                params = parse_qs(urlparse(self.path).query)
+                thread_id = params.get("thread_id", [""])[0].strip()
+                self._send_json(
+                    api.context_status(thread_id or None, out_dir=state.out_dir)
+                )
+                return
+            if path == "/api/search":
+                params = parse_qs(urlparse(self.path).query)
+                query = params.get("q", [""])[0].strip()
+                if not query:
+                    self._error(HTTPStatus.BAD_REQUEST, "q is required")
+                    return
+                playlist_ids = [
+                    p for p in params.get("playlists", [""])[0].split(",") if p
+                ]
+                self._send_json(
+                    api.search_library(
+                        query, out_dir=state.out_dir,
+                        playlist_ids=playlist_ids or None,
+                    )
+                )
+                return
+            if path.startswith("/api/threads/"):
+                thread_id = unquote(path[len("/api/threads/"):])
+                if not THREAD_ID_RE.match(thread_id):
+                    self._error(HTTPStatus.BAD_REQUEST, "bad thread id")
+                    return
+                self._send_json(api.get_thread(thread_id, out_dir=state.out_dir))
                 return
             if path.startswith("/api/jobs/"):
                 job_id = path[len("/api/jobs/"):]
@@ -314,7 +408,9 @@ def make_handler(state: AppState):
             chunks = store.load_chunks(state.out_dir, video_id) or []
             record["transcript"] = transcript.to_dict() if transcript else None
             record["chunks"] = [c.to_dict() for c in chunks]
+            store.migrate_answers(state.out_dir, video_id)
             record["answers"] = store.load_answers(state.out_dir, video_id)
+            record["threads"] = store.list_threads(state.out_dir, video_id=video_id)
             record["media_url"] = (
                 f"/media/{video_id}"
                 if (record.get("has_video") or record.get("has_audio"))
@@ -369,10 +465,73 @@ def make_handler(state: AppState):
 
                 def process(progress):
                     record = api.process(url, out_dir=out_dir, progress=progress, **options)
-                    return {"video_id": record.get("video_id")}
+                    return {
+                        "video_id": record.get("video_id"),
+                        "title": record.get("title") or "",
+                    }
 
                 state.jobs.run(job_id, process)
                 self._send_json({"job_id": job_id}, status=202)
+                return
+            if path.startswith("/api/videos/") and path.endswith("/threads"):
+                video_id = unquote(path[len("/api/videos/"):-len("/threads")])
+                if not VIDEO_ID_RE.match(video_id):
+                    self._error(HTTPStatus.BAD_REQUEST, "bad video id")
+                    return
+                try:
+                    thread = api.create_thread(
+                        video_id,
+                        title=str(payload.get("title") or ""),
+                        mode=str(payload.get("mode") or "ask"),
+                        out_dir=state.out_dir,
+                    )
+                except LLMError as exc:
+                    self._error(HTTPStatus.NOT_FOUND, str(exc))
+                    return
+                self._send_json(thread, status=201)
+                return
+            if path == "/api/playlists":
+                name = str(payload.get("name") or "").strip()
+                if not name:
+                    self._error(HTTPStatus.BAD_REQUEST, "name is required")
+                    return
+                self._send_json(
+                    api.create_playlist(name, out_dir=state.out_dir), status=201,
+                )
+                return
+            if path == "/api/threads":
+                self._send_json(
+                    api.create_thread(
+                        None,
+                        title=str(payload.get("title") or ""),
+                        mode=str(payload.get("mode") or "ask"),
+                        out_dir=state.out_dir,
+                    ),
+                    status=201,
+                )
+                return
+            if path.startswith("/api/threads/") and path.endswith("/messages"):
+                thread_id = unquote(path[len("/api/threads/"):-len("/messages")])
+                if not THREAD_ID_RE.match(thread_id):
+                    self._error(HTTPStatus.BAD_REQUEST, "bad thread id")
+                    return
+                message = str(payload.get("message") or "").strip()
+                if not message:
+                    self._error(HTTPStatus.BAD_REQUEST, "message is required")
+                    return
+                try:
+                    result = api.post_message(
+                        thread_id,
+                        message,
+                        mode=payload.get("mode") or None,
+                        out_dir=state.out_dir,
+                        top_k=int(payload["top_k"]) if payload.get("top_k") else None,
+                        model=payload.get("model") or None,
+                    )
+                except LLMError as exc:
+                    self._error(HTTPStatus.BAD_GATEWAY, str(exc))
+                    return
+                self._send_json(result)
                 return
             if path.startswith("/api/videos/") and path.endswith("/ask"):
                 video_id = unquote(path[len("/api/videos/"):-len("/ask")])
@@ -398,7 +557,70 @@ def make_handler(state: AppState):
                 return
             self._error(HTTPStatus.NOT_FOUND, "not found")
 
+        def _route_patch(self, path: str) -> None:
+            payload = self._read_json()
+            if path.startswith("/api/threads/"):
+                thread_id = unquote(path[len("/api/threads/"):])
+                if not THREAD_ID_RE.match(thread_id):
+                    self._error(HTTPStatus.BAD_REQUEST, "bad thread id")
+                    return
+                playlist_ids = payload.get("playlist_ids")
+                if not isinstance(playlist_ids, list):
+                    playlist_ids = None
+                try:
+                    thread = api.update_thread(
+                        thread_id,
+                        title=payload.get("title"),
+                        playlist_ids=playlist_ids,
+                        mode=payload.get("mode"),
+                        out_dir=state.out_dir,
+                    )
+                except LLMError as exc:
+                    self._error(HTTPStatus.NOT_FOUND, str(exc))
+                    return
+                self._send_json(thread)
+                return
+            if path.startswith("/api/playlists/"):
+                playlist_id = unquote(path[len("/api/playlists/"):])
+                if not PLAYLIST_ID_RE.match(playlist_id):
+                    self._error(HTTPStatus.BAD_REQUEST, "bad playlist id")
+                    return
+                add_ids = payload.get("add_video_ids")
+                remove_ids = payload.get("remove_video_ids")
+                try:
+                    playlist = api.update_playlist(
+                        playlist_id,
+                        name=payload.get("name"),
+                        add_video_ids=add_ids if isinstance(add_ids, list) else None,
+                        remove_video_ids=(
+                            remove_ids if isinstance(remove_ids, list) else None
+                        ),
+                        out_dir=state.out_dir,
+                    )
+                except LLMError as exc:
+                    self._error(HTTPStatus.NOT_FOUND, str(exc))
+                    return
+                self._send_json(playlist)
+                return
+            self._error(HTTPStatus.NOT_FOUND, "not found")
+
         def _route_delete(self, path: str) -> None:
+            if path.startswith("/api/playlists/"):
+                playlist_id = unquote(path[len("/api/playlists/"):])
+                if not PLAYLIST_ID_RE.match(playlist_id):
+                    self._error(HTTPStatus.BAD_REQUEST, "bad playlist id")
+                    return
+                deleted = api.delete_playlist(playlist_id, out_dir=state.out_dir)
+                self._send_json({"deleted": deleted})
+                return
+            if path.startswith("/api/threads/"):
+                thread_id = unquote(path[len("/api/threads/"):])
+                if not THREAD_ID_RE.match(thread_id):
+                    self._error(HTTPStatus.BAD_REQUEST, "bad thread id")
+                    return
+                deleted = api.delete_thread(thread_id, out_dir=state.out_dir)
+                self._send_json({"deleted": deleted})
+                return
             if path.startswith("/api/videos/"):
                 video_id = unquote(path[len("/api/videos/"):])
                 if not VIDEO_ID_RE.match(video_id):
@@ -426,6 +648,15 @@ def make_handler(state: AppState):
             parsed = urlparse(self.path)
             try:
                 self._route_post(parsed.path)
+            except LLMError as exc:
+                self._error(HTTPStatus.BAD_GATEWAY, str(exc))
+            except Exception as exc:  # noqa: BLE001 - HTTP boundary
+                self._error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+
+        def do_PATCH(self) -> None:
+            parsed = urlparse(self.path)
+            try:
+                self._route_patch(parsed.path)
             except LLMError as exc:
                 self._error(HTTPStatus.BAD_GATEWAY, str(exc))
             except Exception as exc:  # noqa: BLE001 - HTTP boundary

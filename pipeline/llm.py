@@ -66,6 +66,7 @@ class LoadedModel:
     name: str
     size_vram: int = 0
     expires_at: str = ""
+    context_length: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -73,6 +74,7 @@ class LoadedModel:
             "size_vram": self.size_vram,
             "size_vram_gb": round(self.size_vram / 1e9, 2),
             "expires_at": self.expires_at,
+            "context_length": self.context_length,
         }
 
 
@@ -176,9 +178,45 @@ class OllamaClient:
                     name=raw.get("name") or raw.get("model") or "",
                     size_vram=int(raw.get("size_vram") or 0),
                     expires_at=raw.get("expires_at") or "",
+                    context_length=int(raw.get("context_length") or 0),
                 )
             )
         return loaded
+
+    def show_model(self, model: str | None = None) -> dict[str, Any]:
+        return self._request(
+            "/api/show", {"model": model or self.model}, timeout=DEFAULT_LIST_TIMEOUT,
+        )
+
+    def model_context_length(self, model: str | None = None) -> int:
+        """Maximum context the model was trained with, from /api/show."""
+        name = model or self.model
+        try:
+            data = self.show_model(name)
+        except LLMError:
+            return 0
+        info = data.get("model_info") or {}
+        arch = str(info.get("general.architecture") or "")
+        for key in (f"{arch}.context_length", "general.context_length", "context_length"):
+            value = info.get(key)
+            if isinstance(value, (int, float)) and value > 0:
+                return int(value)
+        for key, value in info.items():
+            if key.endswith(".context_length") and isinstance(value, (int, float)) and value > 0:
+                return int(value)
+        match = re.search(r"num_ctx\s+(\d+)", str(data.get("parameters") or ""))
+        return int(match.group(1)) if match else 0
+
+    def loaded_context_length(self, model: str | None = None) -> int:
+        """Context Ollama actually allocated for the loaded model, from /api/ps."""
+        name = model or self.model
+        try:
+            for loaded in self.loaded_models():
+                if loaded.name == name:
+                    return loaded.context_length
+        except LLMError:
+            return 0
+        return 0
 
     def refresh(self, model: str | None = None) -> ModelStatus:
         if model:
@@ -275,6 +313,26 @@ class OllamaClient:
         timeout: int | None = None,
         think: bool = False,
     ) -> str:
+        return self.chat_detailed(
+            messages,
+            model=model,
+            temperature=temperature,
+            json_mode=json_mode,
+            timeout=timeout,
+            think=think,
+        )["content"]
+
+    def chat_detailed(
+        self,
+        messages: Sequence[dict[str, str]],
+        *,
+        model: str | None = None,
+        temperature: float = 0.2,
+        json_mode: bool = False,
+        timeout: int | None = None,
+        think: bool = False,
+    ) -> dict[str, Any]:
+        """Chat turn including Ollama's token usage for context displays."""
         payload: dict[str, Any] = {
             "model": model or self.model,
             "messages": list(messages),
@@ -286,7 +344,13 @@ class OllamaClient:
             payload["format"] = "json"
         data = self._request("/api/chat", payload, timeout=timeout or self.timeout)
         message = data.get("message") or {}
-        return strip_thinking(message.get("content") or "")
+        return {
+            "content": strip_thinking(message.get("content") or ""),
+            "model": data.get("model") or (model or self.model),
+            "prompt_tokens": int(data.get("prompt_eval_count") or 0),
+            "eval_tokens": int(data.get("eval_count") or 0),
+            "done_reason": data.get("done_reason") or "",
+        }
 
     # ---- embeddings ----------------------------------------------------
 

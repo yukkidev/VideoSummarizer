@@ -34,15 +34,38 @@ class FakeLLM:
     def __init__(self):
         self.generate_calls = 0
         self.embed_calls = 0
+        self.chat_calls = 0
+        self.last_messages = []
         self.model = "test-model"
 
     def generate(self, prompt, **kwargs):
         self.generate_calls += 1
         return "answer text"
 
+    def chat(self, messages, **kwargs):
+        self.chat_calls += 1
+        self.last_messages = list(messages)
+        return "answer text"
+
+    def chat_detailed(self, messages, **kwargs):
+        self.chat_calls += 1
+        self.last_messages = list(messages)
+        return {
+            "content": "answer text",
+            "model": self.model,
+            "prompt_tokens": 42,
+            "eval_tokens": 7,
+        }
+
     def embed(self, texts, model=None, timeout=None):
         self.embed_calls += 1
         return [[0.1, 0.2, 0.3] for _ in texts]
+
+    def loaded_context_length(self, model=None):
+        return 100000
+
+    def model_context_length(self, model=None):
+        return 200000
 
     def refresh(self, model=None):
         return ModelStatus(server_ok=True, current=model or self.model)
@@ -186,7 +209,15 @@ def test_process_subtitle_only(tmp_data: Path, fake_downloads, fake_transcribe, 
     assert record["audio_path"] is None
 
 
-def test_ask_builds_and_saves_vectors(tmp_data: Path, fake_downloads, fake_transcribe, fake_summarize, fake_llm, monkeypatch):
+def test_process_builds_search_vectors(tmp_data: Path, fake_downloads, fake_transcribe, fake_summarize, fake_llm):
+    api.process("https://example.com/vid1", out_dir=str(tmp_data))
+    stored = store.load_vectors(tmp_data, "vid1")
+    assert stored is not None
+    assert stored["model"] == "nomic-embed-text"
+    assert len(stored["vectors"]) == len(store.load_chunks(tmp_data, "vid1"))
+
+
+def test_ask_returns_answer(tmp_data: Path, fake_downloads, fake_transcribe, fake_summarize, fake_llm, monkeypatch):
     api.process("https://example.com/vid1", out_dir=str(tmp_data))
 
     def fake_answer(video, chunks, question, llm, **kwargs):
@@ -202,13 +233,12 @@ def test_ask_builds_and_saves_vectors(tmp_data: Path, fake_downloads, fake_trans
     payload = api.ask("vid1", "what is this?", out_dir=str(tmp_data))
     assert payload["answer"]["answer"] == "the answer"
     assert payload["answer"]["citations"][0]["start"] == 0.0
-    assert (tmp_data / "vid1" / "vectors.json").exists()
-    history = store.load_answers(tmp_data, "vid1")
-    assert history and history[-1]["question"] == "what is this?"
-    assert fake_llm.embed_calls >= 1
+    assert store.load_answers(tmp_data, "vid1") == []
 
 
-def test_ask_reuses_stored_vectors(tmp_data: Path, fake_downloads, fake_transcribe, fake_summarize, fake_llm, monkeypatch):
+def test_ask_reuses_vectors_stored_at_process_time(
+    tmp_data: Path, fake_downloads, fake_transcribe, fake_summarize, fake_llm, monkeypatch,
+):
     api.process("https://example.com/vid1", out_dir=str(tmp_data))
     builds = {"n": 0}
     real_build = api.build_vectors
@@ -220,9 +250,214 @@ def test_ask_reuses_stored_vectors(tmp_data: Path, fake_downloads, fake_transcri
     monkeypatch.setattr(api, "build_vectors", counting_build)
     monkeypatch.setattr(api, "answer_question", lambda *a, **k: Answer(answer="x"))
     api.ask("vid1", "q1", out_dir=str(tmp_data))
-    assert builds["n"] == 1
     api.ask("vid1", "q2", out_dir=str(tmp_data))
-    assert builds["n"] == 1
+    assert builds["n"] == 0
+
+
+def test_thread_lifecycle_and_history(tmp_data: Path, fake_downloads, fake_transcribe, fake_summarize, fake_llm):
+    api.process("https://example.com/vid1", out_dir=str(tmp_data))
+    thread = api.create_thread("vid1", out_dir=str(tmp_data))
+    assert thread["scope"] == "video"
+    assert thread["video_id"] == "vid1"
+
+    first = api.post_message(thread["thread_id"], "first question", out_dir=str(tmp_data))
+    assert first["message"]["content"] == "answer text"
+    assert first["thread"]["title"] == "first question"
+    assert first["message"]["citations"]
+
+    second = api.post_message(thread["thread_id"], "and second", out_dir=str(tmp_data))
+    assert len(second["thread"]["messages"]) == 4
+    history_roles = [m["role"] for m in fake_llm.last_messages]
+    assert history_roles[0] == "system"
+    assert any("first question" in m["content"] for m in fake_llm.last_messages)
+
+    threads = api.list_threads("vid1", out_dir=str(tmp_data))
+    assert len(threads) == 1
+    assert threads[0]["message_count"] == 4
+
+    assert api.delete_thread(thread["thread_id"], out_dir=str(tmp_data)) is True
+    assert api.list_threads("vid1", out_dir=str(tmp_data)) == []
+
+
+def test_global_thread_searches_across_videos(tmp_data: Path, fake_downloads, fake_transcribe, fake_summarize, fake_llm):
+    api.process("https://example.com/vid1", out_dir=str(tmp_data))
+    thread = api.create_thread(None, out_dir=str(tmp_data))
+    assert thread["scope"] == "global"
+    payload = api.post_message(
+        thread["thread_id"], "hello", mode="chat", out_dir=str(tmp_data),
+    )
+    citations = payload["message"]["citations"]
+    assert citations and citations[0]["video_id"] == "vid1"
+    assert citations[0]["video_title"] == "Video One"
+    assert payload["message"]["mode"] == "chat"
+
+
+def test_search_library(tmp_data: Path, fake_downloads, fake_transcribe, fake_summarize, fake_llm):
+    api.process("https://example.com/vid1", out_dir=str(tmp_data))
+    payload = api.search_library("hello world", out_dir=str(tmp_data))
+    assert payload["citations"][0]["video_id"] == "vid1"
+
+
+def test_search_library_indexes_missing_vectors(
+    tmp_data: Path, fake_downloads, fake_transcribe, fake_summarize, fake_llm,
+):
+    api.process("https://example.com/vid1", out_dir=str(tmp_data))
+    (tmp_data / "vid1" / "vectors.json").unlink()
+    payload = api.search_library("hello world", out_dir=str(tmp_data))
+    assert payload["citations"]
+    assert (tmp_data / "vid1" / "vectors.json").exists()
+
+
+def test_delete_video_removes_its_threads(tmp_data: Path, fake_downloads, fake_transcribe, fake_summarize, fake_llm):
+    api.process("https://example.com/vid1", out_dir=str(tmp_data))
+    api.create_thread("vid1", out_dir=str(tmp_data))
+    assert api.delete_video("vid1", out_dir=str(tmp_data)) is True
+    assert store.list_threads(tmp_data, video_id="vid1") == []
+
+
+def test_legacy_answers_migrate_to_thread(tmp_data: Path):
+    store.save_video(tmp_data, Video(video_id="vid1", url="u", title="T", author="A"))
+    store.append_answer(
+        tmp_data,
+        Answer(
+            video_id="vid1", question="old q", answer="old a", model="m",
+            citations=[Citation(0, 0.0, 1.0, "text", 0.5)],
+        ),
+        created="2026-01-01T00:00:00Z",
+    )
+    threads = api.list_threads("vid1", out_dir=str(tmp_data))
+    assert len(threads) == 1
+    assert threads[0]["title"] == "Earlier questions"
+    assert threads[0]["message_count"] == 2
+    detail = api.get_thread(threads[0]["thread_id"], out_dir=str(tmp_data))
+    assert detail["messages"][0]["content"] == "old q"
+    assert detail["messages"][1]["citations"][0]["text"] == "text"
+    assert not (tmp_data / "vid1" / "answers.jsonl").exists()
+    assert store.load_answers(tmp_data, "vid1") == []
+
+
+def test_create_thread_for_missing_video(tmp_data: Path):
+    with pytest.raises(Exception, match="no processed video"):
+        api.create_thread("nope", out_dir=str(tmp_data))
+
+
+def test_playlist_lifecycle(tmp_data: Path, fake_downloads, fake_transcribe, fake_summarize, fake_llm):
+    api.process("https://example.com/vid1", out_dir=str(tmp_data))
+    playlist = api.create_playlist("Quantum mechanics", out_dir=str(tmp_data))
+    assert playlist["name"] == "Quantum mechanics"
+    assert playlist["video_ids"] == []
+
+    updated = api.update_playlist(
+        playlist["playlist_id"], add_video_ids=["vid1"], out_dir=str(tmp_data),
+    )
+    assert updated["video_ids"] == ["vid1"]
+    assert updated["video_count"] == 1
+
+    playlists = api.list_playlists(out_dir=str(tmp_data))
+    assert len(playlists) == 1
+    assert api.get_playlist(playlist["playlist_id"], out_dir=str(tmp_data))["video_count"] == 1
+
+    renamed = api.update_playlist(
+        playlist["playlist_id"], name="Physics", out_dir=str(tmp_data),
+    )
+    assert renamed["name"] == "Physics"
+
+    emptied = api.update_playlist(
+        playlist["playlist_id"], remove_video_ids=["vid1"], out_dir=str(tmp_data),
+    )
+    assert emptied["video_ids"] == []
+
+    assert api.delete_playlist(playlist["playlist_id"], out_dir=str(tmp_data)) is True
+    assert api.list_playlists(out_dir=str(tmp_data)) == []
+
+
+def test_playlist_rejects_unknown_videos(tmp_data: Path):
+    playlist = api.create_playlist("P", out_dir=str(tmp_data))
+    updated = api.update_playlist(
+        playlist["playlist_id"], add_video_ids=["nope"], out_dir=str(tmp_data),
+    )
+    assert updated["video_ids"] == []
+    with pytest.raises(Exception, match="playlist name"):
+        api.create_playlist("   ", out_dir=str(tmp_data))
+
+
+def test_global_scope_filters_by_playlist(tmp_data: Path, fake_llm):
+    for video_id, title, text in (
+        ("v1", "Quantum Fields", "quantum fields are excitations"),
+        ("v2", "Moths", "moths navigate by moonlight"),
+    ):
+        store.save_video(
+            tmp_data, Video(video_id=video_id, url="u", title=title, author="A"),
+        )
+        store.save_chunks(tmp_data, video_id, [Chunk(0, 0.0, 1.0, text)])
+        store.save_vectors(
+            tmp_data, video_id, "nomic-embed-text", [[0.1, 0.2, 0.3]], 1,
+        )
+    playlist = api.create_playlist("Physics", out_dir=str(tmp_data))
+    api.update_playlist(
+        playlist["playlist_id"], add_video_ids=["v1"], out_dir=str(tmp_data),
+    )
+    thread = api.create_thread(None, out_dir=str(tmp_data))
+    api.update_thread(
+        thread["thread_id"], playlist_ids=[playlist["playlist_id"]],
+        out_dir=str(tmp_data),
+    )
+    payload = api.post_message(thread["thread_id"], "explain", out_dir=str(tmp_data))
+    cited = {c["video_id"] for c in payload["message"]["citations"]}
+    assert cited == {"v1"}
+
+    scoped = api.search_library(
+        "explain", out_dir=str(tmp_data), playlist_ids=[playlist["playlist_id"]],
+    )
+    assert {c["video_id"] for c in scoped["citations"]} == {"v1"}
+
+
+def test_thread_and_message_context_usage(tmp_data: Path, fake_downloads, fake_transcribe, fake_summarize, fake_llm):
+    api.process("https://example.com/vid1", out_dir=str(tmp_data))
+    thread = api.create_thread("vid1", out_dir=str(tmp_data))
+    payload = api.post_message(thread["thread_id"], "hello", out_dir=str(tmp_data))
+    assert payload["message"]["prompt_tokens"] == 42
+    assert payload["message"]["eval_tokens"] == 7
+    assert payload["message"]["context_limit"] == 100000
+
+    context = payload["context"]
+    assert context["model"] == Config.load(str(tmp_data)).model
+    assert context["loaded_context"] == 100000
+    assert context["max_context"] == 200000
+    assert context["prompt_tokens"] == 42
+    assert context["eval_tokens"] == 7
+    assert context["thread_messages"] == 2
+    assert context["thread_tokens"] > 0
+
+    status = api.context_status(thread["thread_id"], out_dir=str(tmp_data))
+    assert status["prompt_tokens"] == 42
+    assert api.context_status(None, out_dir=str(tmp_data))["thread_messages"] == 0
+
+
+def test_update_thread_title_mode_and_scope(tmp_data: Path, fake_downloads, fake_transcribe, fake_summarize, fake_llm):
+    api.process("https://example.com/vid1", out_dir=str(tmp_data))
+    playlist = api.create_playlist("P", out_dir=str(tmp_data))
+    thread = api.create_thread("vid1", out_dir=str(tmp_data))
+    updated = api.update_thread(
+        thread["thread_id"],
+        title="Renamed",
+        mode="chat",
+        playlist_ids=[playlist["playlist_id"], "bogus"],
+        out_dir=str(tmp_data),
+    )
+    assert updated["title"] == "Renamed"
+    assert updated["mode"] == "chat"
+    assert updated["playlist_ids"] == [playlist["playlist_id"]]
+
+
+def test_delete_video_removes_it_from_playlists(tmp_data: Path, fake_downloads, fake_transcribe, fake_summarize, fake_llm):
+    api.process("https://example.com/vid1", out_dir=str(tmp_data))
+    playlist = api.create_playlist("P", out_dir=str(tmp_data))
+    api.update_playlist(
+        playlist["playlist_id"], add_video_ids=["vid1"], out_dir=str(tmp_data),
+    )
+    assert api.delete_video("vid1", out_dir=str(tmp_data)) is True
+    assert api.get_playlist(playlist["playlist_id"], out_dir=str(tmp_data))["video_ids"] == []
 
 
 def test_ask_missing_video(tmp_data: Path, fake_llm):

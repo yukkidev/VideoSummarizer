@@ -3,10 +3,13 @@
 Keys
 ----
 q          quit                 p     process a new URL
-j/k ↓/↑    navigate             a     ask a question
-Tab        switch pane          m     model switcher
-1/2/3      summary/questions/   o     open media at selected timestamp
-           transcript           r     reload video list
+j/k ↓/↑    navigate             a     ask / keep talking
+Tab        switch pane          n     new conversation
+1/2/3      summary/questions/   t     cycle conversations
+           transcript           M     toggle ask/chat mode
+                                m     model switcher
+                                o     open media at selected timestamp
+                                r     reload video list
 """
 
 from __future__ import annotations
@@ -102,7 +105,10 @@ class TuiState:
     tab: str = "summary"
     scroll: int = 0
     detail: dict[str, Any] | None = None
-    answers: list[dict[str, Any]] = field(default_factory=list)
+    threads: list[dict[str, Any]] = field(default_factory=list)
+    thread_id: str = ""
+    thread: dict[str, Any] | None = None
+    thread_mode: str = "ask"
     status: str = "ready"
     busy: bool = False
     models: dict[str, Any] | None = None
@@ -149,12 +155,15 @@ class TuiState:
 
     def qa_lines(self, width: int) -> list[str]:
         lines: list[str] = []
-        for entry in self.answers:
-            lines.extend(wrap_lines("you> " + (entry.get("question") or ""), width))
-            lines.extend(wrap_lines("bot> " + (entry.get("answer") or ""), width))
-            lines.extend(format_citation_lines(entry, width))
+        messages = (self.thread or {}).get("messages") or []
+        for message in messages:
+            role = message.get("role")
+            prefix = "you> " if role == "user" else "bot> "
+            lines.extend(wrap_lines(prefix + (message.get("content") or ""), width))
+            if role != "user":
+                lines.extend(format_citation_lines(message, width))
             lines.append("")
-        return lines or ["(no questions asked yet)"]
+        return lines or ["(no messages in this conversation)"]
 
     def selected_timestamp(self) -> float:
         detail = self.detail or {}
@@ -171,24 +180,88 @@ def load_state(state: TuiState) -> None:
     state.videos = api.list_videos(out_dir=state.out_dir)
     state.clamp()
     state.detail = None
-    state.answers = []
+    state.threads = []
+    state.thread_id = ""
+    state.thread = None
     selected = state.current_video_id
     if selected:
         load_detail(state, selected)
 
 
+def load_threads(state: TuiState, video_id: str, keep: str = "") -> None:
+    try:
+        state.threads = api.list_threads(video_id, out_dir=state.out_dir)
+    except LLMError as exc:
+        state.status = str(exc)
+        state.threads = []
+    wanted = keep if any(t.get("thread_id") == keep for t in state.threads) else ""
+    if not wanted and state.threads:
+        wanted = state.threads[0].get("thread_id") or ""
+    state.thread_id = wanted
+    state.thread = None
+    if wanted:
+        try:
+            state.thread = api.get_thread(wanted, out_dir=state.out_dir)
+            state.thread_mode = state.thread.get("mode") or state.thread_mode
+        except LLMError as exc:
+            state.status = str(exc)
+            state.thread = None
+
+
 def load_detail(state: TuiState, video_id: str) -> None:
+    keep = state.thread_id
     try:
         state.detail = api.get_video_record(video_id, out_dir=state.out_dir)
-        state.answers = api.answer_history(video_id, out_dir=state.out_dir)
     except LLMError as exc:
         state.status = str(exc)
         state.detail = None
-        state.answers = []
+        state.threads = []
+        state.thread = None
+        state.thread_id = ""
+        return
+    load_threads(state, video_id, keep=keep)
 
 
-def add_answer(state: TuiState, answer: dict[str, Any]) -> None:
-    state.answers.append(answer)
+def new_thread(state: TuiState) -> None:
+    video_id = state.current_video_id
+    if not video_id:
+        state.status = "no video selected"
+        return
+    try:
+        thread = api.create_thread(
+            video_id, mode=state.thread_mode, out_dir=state.out_dir,
+        )
+    except LLMError as exc:
+        state.status = str(exc)
+        return
+    state.threads.insert(0, {
+        "thread_id": thread.get("thread_id", ""),
+        "title": thread.get("title", ""),
+        "mode": thread.get("mode", "ask"),
+        "message_count": 0,
+    })
+    state.thread_id = thread.get("thread_id", "")
+    state.thread = thread
+    state.status = "new conversation"
+
+
+def cycle_thread(state: TuiState) -> None:
+    ids = [t.get("thread_id") for t in state.threads]
+    if not ids:
+        state.status = "no conversations yet"
+        return
+    try:
+        index = ids.index(state.thread_id)
+    except ValueError:
+        index = -1
+    next_id = ids[(index + 1) % len(ids)]
+    state.thread_id = next_id or ""
+    try:
+        state.thread = api.get_thread(next_id, out_dir=state.out_dir)
+        state.thread_mode = state.thread.get("mode") or state.thread_mode
+        state.status = f"thread: {state.thread.get('title') or next_id}"
+    except LLMError as exc:
+        state.status = str(exc)
 
 
 class Worker:
@@ -241,10 +314,19 @@ class Worker:
             return
 
         def task(progress) -> None:
-            payload = api.ask(video_id, question, out_dir=self.state.out_dir, progress=progress)
-            self.updates.put(("answer", payload.get("answer", {})))
+            thread_id = self.state.thread_id
+            if not thread_id:
+                thread = api.create_thread(
+                    video_id, mode=self.state.thread_mode, out_dir=self.state.out_dir,
+                )
+                thread_id = thread.get("thread_id", "")
+                self.updates.put(("thread", thread))
+            api.post_message(
+                thread_id, question, mode=self.state.thread_mode,
+                out_dir=self.state.out_dir, progress=progress,
+            )
 
-        self._run("asking", task)
+        self._run("thinking", task)
 
     def drain(self) -> None:
         while True:
@@ -261,8 +343,10 @@ class Worker:
                 self.state.busy = False
                 if self.state.current_video_id:
                     load_detail(self.state, self.state.current_video_id)
-            elif kind == "answer":
-                add_answer(self.state, payload)
+            elif kind == "thread":
+                if payload and payload.get("thread_id"):
+                    self.state.thread_id = payload["thread_id"]
+                    self.state.thread = payload
             elif kind == "open" and payload:
                 self.state.videos = api.list_videos(out_dir=self.state.out_dir)
                 self.state.clamp()
@@ -314,6 +398,9 @@ def _draw(stdscr, state: TuiState) -> None:
     header = " | ".join(
         (f"[{tab}]" if tab == state.tab else tab) for tab in TABS
     ) + " | q&a"
+    if state.thread:
+        thread_title = (state.thread.get("title") or "new conversation")[:24]
+        header += f"  [{state.thread_mode}] {thread_title}"
     _safe_addstr(stdscr, 2, content_x, header, curses.A_BOLD)
     if state.detail:
         title = (state.detail.get("title") or "")[:content_width]
@@ -341,7 +428,7 @@ def _draw(stdscr, state: TuiState) -> None:
     if state.busy:
         status = "⏳ " + status
     _safe_addstr(stdscr, height - 1, 1, status[: width - 2], curses.A_REVERSE)
-    keys = " q:quit p:add a:ask m:model o:open 1/2/3:tabs Tab:pane r:reload "
+    keys = " q:quit p:add a:ask n:new t:thread M:mode m:model o:open 1/2/3:tabs r:reload "
     _safe_addstr(stdscr, height - 2, max(1, width - len(keys) - 2), keys, curses.A_DIM)
     stdscr.refresh()
 
@@ -465,7 +552,7 @@ def run_tui(out_dir: str = "data") -> None:
                 url = _prompt(stdscr, "url> ")
                 if url and not worker.state.busy:
                     worker.process(url)
-            elif key == ord("a"):
+            elif key in (ord("a"),):
                 question = _prompt(stdscr, "ask> ")
                 if not question:
                     continue
@@ -473,6 +560,16 @@ def run_tui(out_dir: str = "data") -> None:
                     state.status = "busy - wait for the current task"
                 else:
                     worker.ask(question)
+            elif key in (ord("n"),):
+                if state.busy:
+                    state.status = "busy - wait for the current task"
+                else:
+                    new_thread(state)
+            elif key in (ord("t"),):
+                cycle_thread(state)
+            elif key in (ord("M"),):
+                state.thread_mode = "chat" if state.thread_mode == "ask" else "ask"
+                state.status = f"mode: {state.thread_mode}"
             elif key == ord("o"):
                 detail = state.detail or {}
                 path = detail.get("video_path") or detail.get("audio_path")
