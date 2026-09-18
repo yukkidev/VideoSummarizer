@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-09-17 — README install guide
+
+### Changed
+
+- **docs**: rewrote the README around a complete install path: platform
+  commands for ffmpeg and Ollama, the required model pulls (`ornith-1.5:9b`,
+  `nomic-embed-text`), pip extras for faster-whisper and yt-dlp, optional
+  `notify-send` / media players, a CLI reference table, and troubleshooting
+  for missing tools. The old feature deep-dives are condensed so the full
+  feature set is still documented without burying the setup steps.
+
 ## 2026-09-17 — Playlists, scoped global chat, context-window display
 
 ### Added

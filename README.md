@@ -9,105 +9,145 @@ download (yt-dlp) → transcribe (faster-whisper) → summary + Q&A (Ollama)
 
 Three interfaces share the same engine:
 
-- **Web GUI** — video player, clickable timestamp citations, built-in downloader,
+- **Web GUI** — player, clickable timestamp citations, built-in downloader,
   model switcher with live refresh
 - **TUI** — fast terminal interface for development
 - **CLI** — scriptable, JSON output for piping
 
 ## Requirements
 
-- Python 3.10+
-- [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) on `PATH` (or installed in the venv)
-- [`ffmpeg`](https://ffmpeg.org/) on `PATH` (yt-dlp uses it for audio extraction)
-- [Ollama](https://ollama.com/) running locally with at least one model
-- Optional: `faster-whisper` for audio transcription; without it, the app falls
-  back to video subtitles
+Install everything below. The app has fallbacks, but you only get the full
+feature set — audio transcription, semantic search, grounded Q&A — when all of
+these are present.
+
+### 1. ffmpeg
+
+Required by yt-dlp to extract audio and merge video.
+
+| Platform | Command |
+|----------|---------|
+| Ubuntu / Debian | `sudo apt install ffmpeg` |
+| Fedora | `sudo dnf install ffmpeg` |
+| Arch | `sudo pacman -S ffmpeg` |
+| macOS | `brew install ffmpeg` |
+| Windows | `winget install Gyan.FFmpeg` |
+
+### 2. Ollama
+
+Runs every model locally. Install, start it, and pull **both** models:
+
+| Platform | Install |
+|----------|---------|
+| Linux | `curl -fsSL https://ollama.com/install.sh \| sh` |
+| macOS | `brew install ollama` or [ollama.com/download](https://ollama.com/download) |
+| Windows | [ollama.com/download](https://ollama.com/download) |
+
+```bash
+ollama serve                   # skip if Ollama already runs as a service
+ollama pull ornith-1.5:9b      # default chat model (summaries + Q&A)
+ollama pull nomic-embed-text   # required for semantic search / retrieval
+```
+
+`nomic-embed-text` is **not optional**: every video is embedded during
+processing so Q&A and global chat can search it. Pull both before your first
+run. Any chat model works — switch later with `vidsum models --set <model>`.
+
+### 3. faster-whisper and yt-dlp
+
+Both are Python packages and ship as extras in the install step below. Do not
+skip them:
+
+- **faster-whisper** transcribes the audio. Without it, the app falls back to
+  downloaded subtitles (and fails when a video has none).
+- **yt-dlp** downloads video, audio, and subtitles.
+
+### Optional extras
+
+- **Desktop notifications** when a job finishes (Linux): `notify-send` from
+  libnotify (`sudo apt install libnotify-bin` or `sudo dnf install libnotify`).
+  Browser notifications work without it.
+- **TUI "open media"**: `mpv`, `ffplay`, or `vlc` — the first one on `PATH`.
 
 ## Install
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -e ".[whisper,media,dev]"
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -e ".[whisper,media]"
 ```
 
-Extras: `whisper` (faster-whisper), `media` (yt-dlp), `dev` (pytest, ruff).
+Installing both extras means every video is transcribed from audio — no silent
+fallback to subtitles.
+
+The first transcription downloads the Whisper `small` model (about 500 MB)
+from Hugging Face and caches it; later runs are offline. It runs on CPU and
+uses a CUDA GPU automatically when one is available.
 
 ## Quick start
 
 ```bash
-# CLI: download + transcribe + summarize
-.venv/bin/vidsum run "https://www.youtube.com/watch?v=..."
+# Web GUI (opens http://127.0.0.1:8765/)
+vidsum gui
 
-# Ask a question (one-shot), or omit the question for a threaded chat REPL
-.venv/bin/vidsum ask <video_id_or_dir> "What did they say about X?"
-.venv/bin/vidsum ask <video_id_or_dir> --new --mode chat   # new conversation
-.venv/bin/vidsum ask --global "What do my videos say about focus?"
-.venv/bin/vidsum threads <video_id_or_dir>                  # list conversations
+# Download + transcribe + summarize
+vidsum run "https://www.youtube.com/watch?v=..."
 
-# List processed videos / switch models
-.venv/bin/vidsum list
-.venv/bin/vidsum models --refresh
-.venv/bin/vidsum models --set qwen3:8b
+# One-shot question about a processed video
+vidsum ask <video_id_or_dir> "What did they say about X?"
+
+# Threaded chat REPL (omit the question)
+vidsum ask <video_id_or_dir>
 
 # Terminal UI
-.venv/bin/vidsum tui
-
-# Web GUI (opens http://127.0.0.1:8765/)
-.venv/bin/vidsum gui
+vidsum tui
 ```
 
-The legacy entry point still works: `python -m pipeline.runner <url>`.
+## CLI reference
+
+| Command | What it does |
+|---------|--------------|
+| `vidsum run <url>` | Download, transcribe, summarize |
+| `vidsum ask <ref> "<question>"` | One-shot grounded answer with citations |
+| `vidsum ask <ref>` | Threaded chat REPL (`--new`, `--mode chat`, `--global`) |
+| `vidsum threads <ref>` | List conversations for a video or the library |
+| `vidsum list` | List processed videos |
+| `vidsum models [--refresh] [--set <model>]` | Inspect or switch Ollama models |
+| `vidsum delete <ref>` | Delete a processed video |
+| `vidsum tui` / `vidsum gui` | Launch the terminal / web interface |
+| `vidsum agents` | Run the agent layer |
+
+`<ref>` is a video id, its data directory, or a URL. `run`, `ask`, `threads`,
+`list`, and `models` accept `--json` for machine-readable output.
 
 ## Web GUI
 
 - Paste a link on the left: choose **video / audio / subtitles**, force a redo,
   or use **subtitles only** to skip Whisper.
-- A live progress bar tracks the background job, and a **browser notification**
-  fires when it finishes (the server also sends a `notify-send` desktop
-  notification, so you can walk away and close the tab).
-- The player streams from disk with HTTP Range support (seeking works).
-- Every timestamp in summaries, answers, and the transcript is **clickable** and
-  jumps the player to that moment. Q&A answers also show scored source chips.
+- A live progress bar tracks the background job, and a browser notification
+  fires when it finishes (the server also sends a desktop notification via
+  `notify-send`, so you can close the tab).
+- The player streams from disk with seeking. Every timestamp in summaries,
+  answers, and the transcript is clickable and jumps the player to that moment.
 - The **Ask** tab is a persistent conversation: pick a thread, start a **New**
   one, delete one, and toggle **Ask** (strictly grounded, cited) vs **Chat**
   (conversational, history-aware). Follow-ups remember the whole conversation.
 - The **Context** button shows how full the window is using Ollama's own
-  numbers: the context actually loaded for the model (`/api/ps`), the model's
-  maximum (`/api/show`), the last request's prompt/generated token counts, and
-  a conversation estimate.
-- **Playlists** in the sidebar group related videos (create with ＋, expand to
-  add/remove videos, delete without touching the library).
-- **All videos · global chat** talks to the library as a whole. Its **Scope**
-  picker is a checkbox dropdown of playlists: select one or more to restrict
-  retrieval to just those videos, so unrelated topics never crowd the context.
-  Citations name the video plus timestamp (click one to jump to that video at
-  that moment).
-- The top bar lists installed models, marks the one **loaded in memory**, and a
-  refresh button re-queries Ollama at any time. Switching models updates
-  `data/config.json` immediately and is picked up by every interface.
-
-## Models
-
-- Default: `ornith-1.5:9b` (configurable)
-- Switch anywhere: `vidsum models --set <model>`, the GUI dropdown, or the TUI
-  `m` overlay
-- Env overrides: `VS_MODEL`, `VS_WHISPER_MODEL`, `VS_OLLAMA_URL`, `VS_DATA_DIR`
-- Pull new models from the GUI (`Pull…`) or with `ollama pull <model>`
+  numbers: the context loaded for the model, the model's maximum, and the last
+  request's token counts.
+- **Playlists** in the sidebar group related videos. **All videos · global
+  chat** talks to the library as a whole, and its **Scope** picker restricts
+  retrieval to selected playlists so unrelated topics never crowd the context.
+- The top bar lists installed models, marks the one loaded in memory, and lets
+  you switch or pull models without leaving the page.
 
 ## Transcription
 
-1. If `faster-whisper` is installed and audio exists, audio is transcribed
-   (default model `small`; override with `--whisper-model` or `VS_WHISPER_MODEL`).
-2. Otherwise, downloaded subtitles (manual or automatic) are parsed.
-3. `--subtitles` / "subtitles only" forces the subtitle path.
-
-Whisper models download from Hugging Face on first use and are cached by
-`faster-whisper`. Use `tiny`/`base` for speed, `small`+ for accuracy.
+1. Audio is transcribed with faster-whisper (default model `small`; override
+   with `--whisper-model` or `VS_WHISPER_MODEL`).
+2. `--subtitles` on the CLI or "subtitles only" in the GUI forces the subtitle
+   path. `tiny`/`base` are faster, `small`+ is more accurate.
 
 ## Q&A and conversations
-
-Questions are answered by retrieval over transcript chunks, with full
-conversation history so follow-ups build on each other:
 
 1. Chunks are embedded locally with `nomic-embed-text` via Ollama during
    processing (cached per video in `data/<video_id>/vectors.json`).
@@ -117,42 +157,36 @@ conversation history so follow-ups build on each other:
    - **chat** — conversational and history-aware; can connect ideas and use
      general knowledge, still citing the video when it draws on it.
 
-Conversations are stored as threads in `data/chats/`, one JSON file each. Every
-video has its own threads, and **global** threads retrieve across the whole
-library (answers cite `title @ [mm:ss]`). A global thread can be **scoped to
-playlists**: only videos in the selected playlists are searched, and the exact
-scope is passed to the model as part of the prompt. Legacy `answers.jsonl`
-histories are migrated into an "Earlier questions" thread on first open.
+Conversations are stored as threads in `data/chats/`. Every video has its own
+threads, and **global** threads retrieve across the whole library (answers cite
+`title @ [mm:ss]`), optionally scoped to playlists.
 
-`GET /api/search?q=...&playlists=<id,id>` exposes the same scoped semantic
-search directly — the `api.search_library` facade an MCP server or external
-tool could wrap.
+## Models
+
+- Default chat model: `ornith-1.5:9b`
+- Embedding model: `nomic-embed-text`
+- Switch anywhere: `vidsum models --set <model>`, the GUI dropdown, or the TUI
+  `m` overlay
+- Pull new models with `ollama pull <model>` or the GUI's **Pull…** button
+- Env overrides: `VS_MODEL`, `VS_WHISPER_MODEL`, `VS_OLLAMA_URL`, `VS_DATA_DIR`
 
 ## Agent layer
 
 ```bash
-.venv/bin/vidsum agents                    # scripted safety demo
-.venv/bin/vidsum agents --agent analyst --task "Summarize the latest video"
-.venv/bin/vidsum agents --agent researcher --url "https://..." --interactive
+vidsum agents                    # scripted safety demo (no LLM needed)
+vidsum agents --agent analyst --task "Summarize the latest video"
+vidsum agents --agent researcher --url "https://..." --interactive
 ```
 
-- Agents have **charters**: allowed tools, allowed write paths, and protected
-  core files (`agents/framework.py`, `pipeline/models.py`, ...).
-- Agents can call `list_videos`, `get_video`, `ask_video`, and the new
-  `search_library` (cross-video semantic recall).
-- Every tool has a danger level: `safe`, `guarded`, or `dangerous`.
-- `HumanGate` is the single choke point: destructive actions are **denied by
-  default**, prompt in `--interactive` mode, and only run hands-off with
-  `--auto` (explicit).
-- Every decision is appended to `data/agents/audit.jsonl`.
-- `Agent.run()` is a real Ollama tool loop with tolerant JSON parsing, repeated
-  call detection, and error feedback.
+Agents have **charters** (allowed tools and write paths), every tool has a
+danger level, and destructive actions are denied unless `--interactive` or
+`--auto` is passed. Every decision is appended to `data/agents/audit.jsonl`.
 
 ## Data layout
 
 ```
 data/
-  config.json               active model + settings (incl. desktop_notify)
+  config.json               active model + settings
   chats/<thread_id>.json    conversation threads (video + global, with scope)
   playlists/<id>.json       playlists and their video ids
   jNQXAC9IVRw/
@@ -162,25 +196,18 @@ data/
     chunks.json             retrieval/summary chunks
     summary.json / .md      summary + questions
     vectors.json            embedding cache
-    answers.jsonl           legacy Q&A log (auto-migrated to a thread)
   agents/audit.jsonl        gate decisions
-```
-
-## Testing
-
-```bash
-.venv/bin/python -m pytest -m "not live"   # fast suite, no network
-.venv/bin/python -m pytest -m live         # real Ollama + whisper + network
-.venv/bin/ruff check .
 ```
 
 ## Troubleshooting
 
 - **"No video formats found" / 403s from YouTube** — update yt-dlp:
-  `.venv/bin/pip install -U yt-dlp` (the venv copy is preferred automatically).
-- **"faster-whisper is not installed"** — `pip install -e ".[whisper]"`, or use
-  `--subtitles`.
-- **"cannot reach Ollama"** — make sure `ollama serve` is running and a model is
-  pulled; `vidsum models --refresh` shows the live state.
+  `pip install -U yt-dlp` (the venv copy is preferred automatically).
+- **"faster-whisper is not installed"** — reinstall with the extra:
+  `pip install -e ".[whisper,media]"`.
+- **"cannot reach Ollama"** — make sure `ollama serve` is running;
+  `vidsum models --refresh` shows the live state.
+- **"model not installed"** — `ollama pull ornith-1.5:9b` and
+  `ollama pull nomic-embed-text`.
 - **Long videos** are summarized with map-reduce (per-section notes, then a
   final synthesis), so context limits are not a problem.
