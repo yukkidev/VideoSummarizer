@@ -1,7 +1,6 @@
 # VideoSummarizer
 
-Watch any video, get a clean summary, then **ask it anything** — all local:
-no API bills, no data leaving your machine.
+Watch any video, get a summary, then **ask it anything**. All running locally using local tools and local models. 
 
 ```
 download (yt-dlp) → transcribe (faster-whisper) → summary + Q&A (Ollama)
@@ -44,7 +43,7 @@ Runs every model locally. Install, start it, and pull **both** models:
 
 ```bash
 ollama serve                   # skip if Ollama already runs as a service
-ollama pull ornith-1.5:9b      # default chat model (summaries + Q&A)
+ollama pull gemma4:e4b      # default chat model (summaries + Q&A)
 ollama pull nomic-embed-text   # required for semantic search / retrieval
 ```
 
