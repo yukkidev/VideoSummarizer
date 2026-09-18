@@ -10,6 +10,11 @@
   `notify-send` / media players, a CLI reference table, and troubleshooting
   for missing tools. The old feature deep-dives are condensed so the full
   feature set is still documented without burying the setup steps.
+- **docs**: noted Ollama's 4096-token default context and how to raise it
+  globally (`OLLAMA_CONTEXT_LENGTH` in the systemd service), and listed
+  lighter chat models (`qwen3:4b`, `qwen3:8b`, `gemma4:e2b`,
+  `gemma4:e2b-it-qat`) for low-end hardware, including how to pull the
+  smaller QAT quant explicitly.
 
 ## 2026-09-17 — Playlists, scoped global chat, context-window display
 

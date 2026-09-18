@@ -1,6 +1,6 @@
 # VideoSummarizer
 
-Watch any video, get a summary, then **ask it anything**. All running locally using local tools and local models. 
+Watch any video, get a summary, then **ask it anything**. All running locally using local tools and local models.
 
 ```
 download (yt-dlp) → transcribe (faster-whisper) → summary + Q&A (Ollama)
@@ -43,13 +43,28 @@ Runs every model locally. Install, start it, and pull **both** models:
 
 ```bash
 ollama serve                   # skip if Ollama already runs as a service
-ollama pull gemma4:e4b      # default chat model (summaries + Q&A)
+ollama pull ornith-1.5:9b      # default chat model (summaries + Q&A)
 ollama pull nomic-embed-text   # required for semantic search / retrieval
 ```
 
 `nomic-embed-text` is **not optional**: every video is embedded during
 processing so Q&A and global chat can search it. Pull both before your first
-run. Any chat model works — switch later with `vidsum models --set <model>`.
+run.
+
+> **Raise Ollama's context window.** It defaults to a small 4096 tokens. On
+> Linux, set `Environment="OLLAMA_CONTEXT_LENGTH=8192"` in the Ollama service
+> (`sudo systemctl edit ollama.service`), then
+> `sudo systemctl daemon-reload && sudo systemctl restart ollama`.
+
+On low-end or low-VRAM hardware, switch to a lighter chat model such as
+`qwen3:4b`, `qwen3:8b`, or `gemma4:e2b`. The plain `gemma4:e2b` tag resolves to
+the 7.2 GB q4_K_M quant; for the smaller 4.3 GB QAT build, pull the explicit
+tag:
+
+```bash
+ollama pull gemma4:e2b-it-qat
+vidsum models --set gemma4:e2b-it-qat
+```
 
 ### 3. faster-whisper and yt-dlp
 
@@ -163,6 +178,8 @@ threads, and **global** threads retrieve across the whole library (answers cite
 ## Models
 
 - Default chat model: `ornith-1.5:9b`
+- Lighter options for low-end hardware: `qwen3:4b`, `qwen3:8b`, `gemma4:e2b`,
+  or `gemma4:e2b-it-qat` (smallest quant)
 - Embedding model: `nomic-embed-text`
 - Switch anywhere: `vidsum models --set <model>`, the GUI dropdown, or the TUI
   `m` overlay
@@ -208,5 +225,8 @@ data/
   `vidsum models --refresh` shows the live state.
 - **"model not installed"** — `ollama pull ornith-1.5:9b` and
   `ollama pull nomic-embed-text`.
+- **Model won't fit in memory** — switch to a lighter chat model:
+  `ollama pull qwen3:4b` (or `gemma4:e2b-it-qat`), then
+  `vidsum models --set qwen3:4b`.
 - **Long videos** are summarized with map-reduce (per-section notes, then a
   final synthesis), so context limits are not a problem.
